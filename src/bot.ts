@@ -9,6 +9,7 @@ import { Bot, GrammyError, HttpError, session } from 'grammy';
 import { config } from './config.js';
 import { describeError, logger } from './logger.js';
 import { requestLogger } from './middlewares/logging.js';
+import { replyToSender } from './middlewares/reply.js';
 import { rateLimit } from './middlewares/rateLimit.js';
 import { registerBasicCommands } from './commands/basic.js';
 import { registerAiCommands } from './commands/ai.js';
@@ -19,7 +20,10 @@ import type { BotContext, SessionData } from './types.js';
 export const BOT_COMMANDS = [
   { command: 'start', description: 'Запустить бота и увидеть справку' },
   { command: 'help', description: 'Список всех команд' },
-  { command: 'ask', description: 'Задать вопрос текстовой нейросети' },
+  // Кириллическую /гем в это меню добавить нельзя: Telegram принимает
+  // в именах команд только латиницу (иначе BOT_COMMAND_INVALID).
+  { command: 'gem', description: 'Запрос к Gemini (то же самое, что /гем)' },
+  { command: 'ask', description: 'Вопрос выбранной текстовой нейросети' },
   { command: 'draw', description: 'Нарисовать картинку по описанию' },
   { command: 'ai', description: 'Выбрать активную нейросеть' },
   { command: 'reset', description: 'Очистить историю диалога' },
@@ -38,7 +42,10 @@ export function createBot(): Bot<BotContext> {
   // 1. Логирование — первым, чтобы видеть в том числе отвалившиеся апдейты.
   bot.use(requestLogger);
 
-  // 2. Сессия. По умолчанию хранится в памяти процесса: при рестарте
+  // 2. Ответы реплаем и в нужный топик форума.
+  bot.use(replyToSender);
+
+  // 3. Сессия. По умолчанию хранится в памяти процесса: при рестарте
   //    контекст диалогов теряется, а несколько реплик бота не увидят
   //    сессии друг друга. Для продакшена подключите внешнее хранилище:
   //    npm i @grammyjs/storage-redis
@@ -50,17 +57,30 @@ export function createBot(): Bot<BotContext> {
         imageProviderId: DEFAULT_IMAGE_PROVIDER_ID,
         history: [],
       }),
+      // Ключ сессии по умолчанию — id чата. Для форумов добавляем id топика:
+      // так в каждом топике будет собственная история диалога и они
+      // не перемешиваются между собой.
+      getSessionKey: (ctx) => {
+        const chatId = ctx.chat?.id;
+        if (chatId === undefined) return undefined;
+
+        const message = ctx.message ?? ctx.callbackQuery?.message;
+        const isTopic = message && 'is_topic_message' in message && message.is_topic_message;
+        const threadId = isTopic ? message.message_thread_id : undefined;
+
+        return threadId === undefined ? String(chatId) : `${chatId}:${threadId}`;
+      },
     }),
   );
 
-  // 3. Защита от спама.
+  // 4. Защита от спама.
   bot.use(rateLimit);
 
-  // 4. Команды.
+  // 5. Команды.
   registerBasicCommands(bot);
   registerAiCommands(bot);
 
-  // 5. Глобальная ловушка ошибок: без неё любое исключение
+  // 6. Глобальная ловушка ошибок: без неё любое исключение
   //    в обработчике уронит поллинг.
   bot.catch(async (botError) => {
     const { ctx, error } = botError;

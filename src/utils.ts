@@ -25,35 +25,6 @@ export async function withTimeout<T>(promise: Promise<T>, ms: number, label: str
   }
 }
 
-/**
- * Режет длинный текст на куски, влезающие в одно сообщение Telegram
- * (жёсткий лимит — 4096 символов). Стараемся резать по переводу строки,
- * чтобы не рвать слова и абзацы посередине.
- */
-export function splitMessage(text: string, limit = 3800): string[] {
-  if (text.length <= limit) return [text];
-
-  const chunks: string[] = [];
-  let rest = text;
-
-  while (rest.length > limit) {
-    const window = rest.slice(0, limit);
-    // Ищем ближайший удобный разделитель с конца окна.
-    const breakPoint = Math.max(window.lastIndexOf('\n\n'), window.lastIndexOf('\n'), window.lastIndexOf(' '));
-    const cut = breakPoint > limit * 0.5 ? breakPoint : limit;
-    chunks.push(rest.slice(0, cut).trimEnd());
-    rest = rest.slice(cut).trimStart();
-  }
-
-  if (rest.length > 0) chunks.push(rest);
-  return chunks;
-}
-
-/** Экранирует спецсимволы для parse_mode: 'HTML'. */
-export function escapeHtml(text: string): string {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
 /** Человекочитаемая длительность: 3665000 -> "1 ч 1 мин 5 с". */
 export function formatDuration(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);

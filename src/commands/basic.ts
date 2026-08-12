@@ -9,7 +9,8 @@ import type { Bot } from 'grammy';
 import { config, isAdmin } from '../config.js';
 import { logger } from '../logger.js';
 import { describeProviders, resolveTextProvider } from '../services/registry.js';
-import { escapeHtml, formatDuration } from '../utils.js';
+import { escapeHtml } from '../format.js';
+import { formatDuration } from '../utils.js';
 import type { BotContext } from '../types.js';
 
 /** Текст справки — используется в /start и /help. */
@@ -17,7 +18,8 @@ const HELP_TEXT = [
   '<b>Что я умею</b>',
   '',
   '<b>Нейросети</b>',
-  '/ask <i>вопрос</i> — задать вопрос текстовой модели (Gemini или OpenAI-совместимой)',
+  '/гем <i>запрос</i> — спросить Gemini (то же самое: /gem)',
+  '/ask <i>вопрос</i> — спросить нейросеть, выбранную в /ai',
   '/draw <i>описание</i> — нарисовать картинку через FusionBrain (Kandinsky)',
   '/ai — показать провайдеров и переключить активного',
   '/reset — очистить историю диалога',
@@ -35,7 +37,8 @@ const HELP_TEXT = [
   '/status — аптайм, память, режим работы',
   '/help — эта справка',
   '',
-  '<i>В личных сообщениях можно писать вопрос без команды — я пойму.</i>',
+  '<i>Обычные сообщения запросом не считаются — обращайтесь ко мне командой.</i>',
+  '<i>В группах и в топиках форума я отвечаю там же, где спросили, реплаем на ваш запрос.</i>',
 ].join('\n');
 
 export function registerBasicCommands(bot: Bot<BotContext>): void {

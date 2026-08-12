@@ -1,21 +1,45 @@
 /**
- * Команды, работающие с нейросетями: /ask, /draw, /ai, /reset.
+ * Команды, работающие с нейросетями: /гем (/gem), /ask, /draw, /ai, /reset.
  *
- * Обработчики намеренно ничего не знают о конкретных API — они берут
- * провайдера из реестра (src/services/registry.ts) по id из сессии чата.
+ * Про две формы команды Gemini
+ * ----------------------------
+ * Telegram считает командой только латиницу: имя вида «гем» он не принимает
+ * (setMyCommands отвечает BOT_COMMAND_INVALID) и не размечает такое слово
+ * как bot_command. Поэтому:
+ *   • /gem — настоящая команда: видна в меню и работает в группах даже
+ *     при включённом privacy mode;
+ *   • /гем — ловим регулярным выражением по тексту сообщения. В личке
+ *     работает всегда, в группах — только если у бота отключён privacy mode
+ *     (@BotFather → /setprivacy → Disable).
  */
-import { InlineKeyboard, InputFile, type Bot } from 'grammy';
+import { GrammyError, InlineKeyboard, InputFile, type Bot } from 'grammy';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import {
   describeProviders,
+  findTextProvider,
   imageProviders,
   resolveImageProvider,
   resolveTextProvider,
   textProviders,
 } from '../services/registry.js';
-import { escapeHtml, splitMessage, withChatAction } from '../utils.js';
-import { ProviderNotConfiguredError, ProviderRequestError, type BotContext } from '../types.js';
+import { escapeHtml, markdownToTelegramHtml, splitMarkdown } from '../format.js';
+import { withChatAction } from '../utils.js';
+import {
+  ProviderNotConfiguredError,
+  ProviderRequestError,
+  type BotContext,
+  type TextProvider,
+} from '../types.js';
+
+/** id провайдера Gemini в реестре. */
+const GEMINI_ID = 'gemini';
+
+/**
+ * Кириллическая форма команды: /гем, /гем@имя_бота.
+ * Регистр не важен, аргументы — всё, что после первого пробела.
+ */
+const CYRILLIC_GEM = /^\/гем(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/i;
 
 /** Единая обработка ошибок нейросетей: пользователю — подсказка, в лог — детали. */
 async function replyWithError(ctx: BotContext, error: unknown): Promise<void> {
@@ -40,11 +64,38 @@ async function replyWithError(ctx: BotContext, error: unknown): Promise<void> {
   await ctx.reply('😔 Что-то пошло не так. Попробуйте ещё раз чуть позже.');
 }
 
-/** Общий сценарий «вопрос → ответ текстовой модели». */
-async function handleQuestion(ctx: BotContext, prompt: string): Promise<void> {
-  try {
-    const provider = resolveTextProvider(ctx.session.textProviderId);
+/**
+ * Отправляет ответ нейросети с разметкой.
+ *
+ * Модель пишет обычный Markdown, а Telegram понимает свой ограниченный
+ * набор тегов — конвертируем (см. src/format.ts). Если Telegram всё же
+ * не принял разметку, повторяем отправку обычным текстом: пользователь
+ * должен получить ответ в любом случае.
+ */
+async function sendMarkdown(ctx: BotContext, markdown: string): Promise<void> {
+  for (const chunk of splitMarkdown(markdown)) {
+    try {
+      await ctx.reply(markdownToTelegramHtml(chunk), {
+        parse_mode: 'HTML',
+        link_preview_options: { is_disabled: true },
+      });
+    } catch (error) {
+      const isMarkupError =
+        error instanceof GrammyError && /parse entities|unsupported start tag|can't find end/i.test(error.description);
 
+      if (!isMarkupError) throw error;
+
+      logger.warn('Telegram отклонил разметку, отправляю обычным текстом', {
+        description: error.description,
+      });
+      await ctx.reply(chunk, { link_preview_options: { is_disabled: true } });
+    }
+  }
+}
+
+/** Общий сценарий «вопрос → ответ» для конкретного провайдера. */
+async function askProvider(ctx: BotContext, provider: TextProvider, prompt: string): Promise<void> {
+  try {
     // Историю передаём укороченной: длинный контекст = дороже и медленнее.
     const history = config.ai.historyLimit > 0 ? ctx.session.history.slice(-config.ai.historyLimit) : [];
 
@@ -57,14 +108,40 @@ async function handleQuestion(ctx: BotContext, prompt: string): Promise<void> {
       ctx.session.history = ctx.session.history.slice(-config.ai.historyLimit);
     }
 
-    // Ответ модели отправляем без parse_mode: в нём легко встречаются
-    // символы * _ [ ] < >, из-за которых Telegram отклонил бы сообщение.
-    for (const chunk of splitMessage(answer)) {
-      await ctx.reply(chunk);
-    }
+    await sendMarkdown(ctx, answer);
   } catch (error) {
     await replyWithError(ctx, error);
   }
+}
+
+/** Берёт текст запроса из аргументов команды либо из сообщения, на которое ответили. */
+function extractPrompt(ctx: BotContext, args: string): string {
+  return args.trim() || ctx.message?.reply_to_message?.text?.trim() || '';
+}
+
+/** Обработчик /гем и /gem — всегда обращается именно к Gemini. */
+async function handleGemini(ctx: BotContext, prompt: string): Promise<void> {
+  if (!prompt) {
+    await ctx.reply(
+      'Напишите запрос после команды. Например:\n' +
+        '<code>/гем объясни рекурсию за три предложения</code>\n\n' +
+        'Ещё можно ответить командой <code>/гем</code> на любое сообщение — я возьму его текст.',
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
+  const gemini = findTextProvider(GEMINI_ID);
+  if (!gemini) {
+    await ctx.reply('⚠️ Провайдер Gemini не зарегистрирован в боте.');
+    return;
+  }
+  if (!gemini.isConfigured) {
+    await ctx.reply(`🔌 Gemini не подключён.\n\n• ${gemini.setupHint}`);
+    return;
+  }
+
+  await askProvider(ctx, gemini, prompt);
 }
 
 /** Клавиатура выбора провайдера. Активный помечен зелёным, ненастроенный — замком. */
@@ -97,31 +174,51 @@ function buildProviderMessage(ctx: BotContext): string {
     `Сейчас активны: <code>${escapeHtml(ctx.session.textProviderId)}</code> для текста, ` +
       `<code>${escapeHtml(ctx.session.imageProviderId)}</code> для картинок.`,
     '',
-    '<i>Нажмите кнопку, чтобы переключить провайдера для этого чата.</i>',
+    '<i>Выбор влияет на /ask. Команда /гем всегда обращается к Gemini.</i>',
   ].join('\n');
 }
 
 export function registerAiCommands(bot: Bot<BotContext>): void {
+  // ------------------------------------------------------- /gem и /гем
+  bot.command('gem', async (ctx) => {
+    await handleGemini(ctx, extractPrompt(ctx, ctx.match));
+  });
+
+  bot.hears(CYRILLIC_GEM, async (ctx) => {
+    // ctx.match для регулярки — результат exec; для строкового триггера это string.
+    const match = typeof ctx.match === 'string' ? null : ctx.match;
+    const addressee = match?.[1];
+
+    // В группе может быть несколько ботов: /гем@другой_бот — не наше дело.
+    if (addressee && addressee.toLowerCase() !== ctx.me.username.toLowerCase()) return;
+
+    await handleGemini(ctx, extractPrompt(ctx, match?.[2] ?? ''));
+  });
+
   // ------------------------------------------------------------------ /ask
+  // Работает через провайдера, выбранного в /ai (по умолчанию тот же Gemini).
   bot.command('ask', async (ctx) => {
-    // Промпт берём после команды, а если его нет — из сообщения, на которое ответили.
-    const prompt = ctx.match.trim() || ctx.message?.reply_to_message?.text?.trim() || '';
+    const prompt = extractPrompt(ctx, ctx.match);
 
     if (!prompt) {
       await ctx.reply(
-        'Задайте вопрос после команды. Например:\n<code>/ask объясни рекурсию за 3 предложения</code>\n\n' +
-          'Ещё можно ответить командой /ask на любое сообщение — я возьму его текст.',
+        'Задайте вопрос после команды. Например:\n<code>/ask объясни рекурсию за 3 предложения</code>',
         { parse_mode: 'HTML' },
       );
       return;
     }
 
-    await handleQuestion(ctx, prompt);
+    try {
+      const provider = resolveTextProvider(ctx.session.textProviderId);
+      await askProvider(ctx, provider, prompt);
+    } catch (error) {
+      await replyWithError(ctx, error);
+    }
   });
 
   // ----------------------------------------------------------------- /draw
   bot.command('draw', async (ctx) => {
-    const prompt = ctx.match.trim() || ctx.message?.reply_to_message?.text?.trim() || '';
+    const prompt = extractPrompt(ctx, ctx.match);
 
     if (!prompt) {
       await ctx.reply('Опишите картинку. Например:\n<code>/draw кот-космонавт в стиле акварели</code>', {
@@ -177,7 +274,7 @@ export function registerAiCommands(bot: Bot<BotContext>): void {
     }
 
     if (!provider.isConfigured) {
-      // alert: true — Telegram покажет всплывающее окно вместо тоста.
+      // show_alert — Telegram покажет всплывающее окно вместо тоста.
       await ctx.answerCallbackQuery({ text: `${provider.title}: нет ключей в .env`, show_alert: true });
       return;
     }
@@ -204,18 +301,19 @@ export function registerAiCommands(bot: Bot<BotContext>): void {
   // Регистрируется последним: сюда попадает всё, что не разобрали
   // предыдущие обработчики.
   bot.on('message:text', async (ctx) => {
+    // В группах бот молчит на обычные сообщения: обращаться к нему нужно
+    // командой. Иначе он вклинивался бы в каждую беседу.
+    if (ctx.chat.type !== 'private') return;
+
     const text = ctx.message.text.trim();
 
-    // Неизвестная команда — подсказываем справку, а не отправляем её в нейросеть.
     if (text.startsWith('/')) {
       await ctx.reply('🤔 Не знаю такую команду. Список всех команд — /help');
       return;
     }
 
-    // В группах бот молчит, пока к нему не обратились явно через команду:
-    // иначе он будет вклиниваться в каждое сообщение чата.
-    if (ctx.chat.type !== 'private') return;
-
-    await handleQuestion(ctx, text);
+    // Свободный текст запросом не считается — это осознанное решение,
+    // чтобы случайные сообщения не тратили квоту нейросети.
+    await ctx.reply('Чтобы спросить нейросеть, используйте команду. Например:\n/гем ' + text.slice(0, 100));
   });
 }
