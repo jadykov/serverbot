@@ -24,12 +24,13 @@
 6. [Запуск в Docker: dev](#запуск-в-docker-dev)
 7. [Запуск в Docker: production](#запуск-в-docker-production)
 8. [Деплой на удалённый сервер](#деплой-на-удалённый-сервер)
-9. [Работа в группах и топиках](#работа-в-группах-и-топиках)
-10. [Разметка ответов](#разметка-ответов)
-11. [Как проверить, что всё работает](#как-проверить-что-всё-работает)
-12. [Переменные окружения](#переменные-окружения)
-13. [Как добавить свою нейросеть](#как-добавить-свою-нейросеть)
-14. [Траблшутинг](#траблшутинг)
+9. [Публикация образа в GHCR](#публикация-образа-в-ghcr)
+10. [Работа в группах и топиках](#работа-в-группах-и-топиках)
+11. [Разметка ответов](#разметка-ответов)
+12. [Как проверить, что всё работает](#как-проверить-что-всё-работает)
+13. [Переменные окружения](#переменные-окружения)
+14. [Как добавить свою нейросеть](#как-добавить-свою-нейросеть)
+15. [Траблшутинг](#траблшутинг)
 
 ---
 
@@ -88,8 +89,11 @@ serverbot/
 │       ├── openai-compatible.ts # OpenAI / OpenRouter / DeepSeek / Ollama…
 │       └── fusionbrain.ts     # FusionBrain (Kandinsky), генерация картинок
 ├── Dockerfile                 # multi-stage: dev / build / runtime
-├── docker-compose.yml         # production
+├── docker-compose.yml         # production, сборка из исходников
 ├── docker-compose.dev.yml     # разработка с hot-reload
+├── docker-compose.deploy.yml  # запуск готового образа из GHCR
+├── .github/workflows/
+│   └── docker-publish.yml     # автосборка и публикация образа в GHCR
 └── .env.example               # шаблон конфигурации
 ```
 
@@ -350,6 +354,124 @@ sudo ufw enable
 
 ---
 
+## Публикация образа в GHCR
+
+Готовый образ в GitHub Container Registry позволяет разворачивать бота на любой
+машине одной командой — без исходников, Node.js и сборки. Нужен только Docker.
+
+Итоговое имя образа: **`ghcr.io/jadykov/serverbot`**
+(шаблон — `ghcr.io/<владелец>/<репозиторий>`, всё строчными буквами).
+
+### Способ 1: автоматически через GitHub Actions (рекомендуется)
+
+В репозитории уже лежит `.github/workflows/docker-publish.yml`. Он собирает
+образ под **linux/amd64 и linux/arm64** и публикует его при каждом пуше в `main`.
+Токен создавать не нужно — Actions использует встроенный `GITHUB_TOKEN`.
+
+Достаточно запушить workflow в репозиторий:
+
+```bash
+git add .github/workflows/docker-publish.yml docker-compose.deploy.yml
+git commit -m "Публикация образа в GHCR"
+git push
+```
+
+Дальше — вкладка **Actions** в репозитории: там видно ход сборки. Первый запуск
+занимает ~5 минут (arm64 собирается через эмуляцию), последующие — быстрее
+за счёт кэша слоёв.
+
+Теги, которые создаёт workflow:
+
+| Тег | Когда появляется | Пример |
+| --- | --- | --- |
+| `latest` | пуш в `main` | `ghcr.io/jadykov/serverbot:latest` |
+| `sha-<хеш>` | каждая сборка | `ghcr.io/jadykov/serverbot:sha-0aaf4da` |
+| `1.2.3`, `1.2` | git-тег `v1.2.3` | `ghcr.io/jadykov/serverbot:1.2.3` |
+
+Выпустить версию:
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+### Способ 2: вручную со своей машины
+
+Понадобится **Personal Access Token (classic)** с правом `write:packages`:
+GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic).
+
+```bash
+# 1. Логин в реестр (токен вставляется в ответ на приглашение)
+docker login ghcr.io -u jadykov
+
+# 2. Сборщик для мультиарх-образов (создаётся один раз)
+docker buildx create --name multiarch --driver docker-container --use
+
+# 3. Сборка и публикация сразу под две архитектуры
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --target runtime \
+  -t ghcr.io/jadykov/serverbot:latest \
+  --push .
+```
+
+Только под свою архитектуру (быстрее): уберите `--platform`.
+
+### Сделать образ публичным
+
+**Это обязательный шаг:** при первой публикации пакет создаётся приватным,
+и `docker pull` с чужой машины вернёт `denied`.
+
+1. Откройте профиль → вкладка **Packages** → пакет `serverbot`
+   (прямая ссылка: `https://github.com/users/jadykov/packages/container/serverbot/settings`);
+2. блок **Danger Zone** → **Change visibility** → **Public** → подтвердите ввод имени.
+
+Там же, в **Manage Actions access**, стоит связать пакет с репозиторием, чтобы
+последующие сборки могли его перезаписывать (обычно связывается само по метке
+`org.opencontainers.image.source`).
+
+Проверка со стороны — без логина в Docker:
+
+```bash
+docker pull ghcr.io/jadykov/serverbot:latest
+```
+
+### Развернуть на любой VM
+
+На чистой машине нужны только Docker, файл `.env` и один compose-файл:
+
+```bash
+# 1. Docker
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker $USER && exit   # перелогиньтесь
+
+# 2. Каталог и конфигурация
+mkdir -p ~/serverbot && cd ~/serverbot
+curl -O https://raw.githubusercontent.com/jadykov/serverbot/main/docker-compose.deploy.yml
+curl -o .env https://raw.githubusercontent.com/jadykov/serverbot/main/.env.example
+nano .env                                # впишите BOT_TOKEN и ключи нейросетей
+
+# 3. Запуск
+docker compose -f docker-compose.deploy.yml up -d
+docker compose -f docker-compose.deploy.yml logs -f
+```
+
+Обновление до свежего образа:
+
+```bash
+docker compose -f docker-compose.deploy.yml pull
+docker compose -f docker-compose.deploy.yml up -d
+```
+
+Совсем без compose — одной командой:
+
+```bash
+docker run -d --name serverbot --restart unless-stopped \
+  --env-file .env -e NODE_ENV=production \
+  ghcr.io/jadykov/serverbot:latest
+```
+
+---
+
 ## Работа в группах и топиках
 
 Бот полностью работает в группах и супергруппах, в том числе в форумах с топиками.
@@ -448,6 +570,87 @@ curl -s "https://api.telegram.org/bot<ВАШ_ТОКЕН>/getMe"
 ---
 
 ## Переменные окружения
+
+Вся конфигурация бота задаётся только переменными окружения — в коде нет ни одного
+захардкоженного ключа. Читает их `src/config.ts`, там же лежат значения по умолчанию
+и проверки: при неверной конфигурации бот не стартует, а печатает понятный список
+проблем.
+
+### Минимум для запуска
+
+Обязательна ровно одна переменная — токен бота. Всё остальное включает функции:
+
+```dotenv
+BOT_TOKEN=1234567890:AAH...          # обязательно, от @BotFather
+GEMINI_API_KEY=AIza...               # чтобы работали /гем и /ask
+FUSIONBRAIN_API_KEY=...              # чтобы работал /draw
+FUSIONBRAIN_SECRET_KEY=...
+```
+
+Если ключа нейросети нет, бот всё равно запустится: команда просто ответит
+подсказкой, чего не хватает. Проверить, что видит бот, — команда `/test`.
+
+### Четыре способа передать переменные
+
+**1. Файл `.env` — разработка и docker compose**
+
+Самый частый вариант. Файл лежит рядом с `package.json`, в git не попадает.
+
+```bash
+cp .env.example .env
+nano .env
+npm run dev        # dotenv подхватит файл автоматически
+```
+
+Compose-файлы (`docker-compose.yml`, `.dev.yml`, `.deploy.yml`) читают тот же
+`.env` через `env_file` — отдельно ничего настраивать не нужно.
+
+**2. Флаги `docker run`**
+
+```bash
+docker run -d --env-file .env \
+  -e LOG_LEVEL=debug \
+  ghcr.io/jadykov/serverbot:latest
+```
+
+Значение из `-e` перекрывает значение из `--env-file`.
+
+**3. systemd — запуск без Docker**
+
+```ini
+[Service]
+EnvironmentFile=/opt/serverbot/.env
+Environment=NODE_ENV=production
+```
+
+**4. Секреты CI/облака**
+
+В GitHub Actions, Kubernetes, Fly.io и т.п. переменные подставляются платформой.
+Ничего менять в коде не нужно: приложение просто читает `process.env`.
+
+### Правила синтаксиса `.env`
+
+```dotenv
+# комментарий
+BOT_TOKEN=1234567890:AAH...      # без кавычек и без пробелов вокруг =
+ADMIN_IDS=111111111,222222222    # список — через запятую, без пробелов
+GEMINI_THINKING=                 # пустое значение = «не задано»
+```
+
+Частые ошибки: пробелы вокруг `=` (`BOT_TOKEN = 123` не сработает), кавычки
+вокруг значения (попадут внутрь строки), перевод строки в середине токена
+после копирования.
+
+### Безопасность
+
+* `.env` перечислен в `.gitignore` и в `.dockerignore` — он **не попадает
+  ни в репозиторий, ни внутрь образа**. Образ можно публиковать публично:
+  ключей в нём нет, они подставляются при запуске контейнера.
+* На сервере ограничьте доступ к файлу: `chmod 600 .env`.
+* Ключ утёк — отзовите его (@BotFather → `/revoke`, AI Studio → удалить ключ)
+  и просто перезапустите контейнер с новым значением.
+
+### Полный список
 
 | Переменная | По умолчанию | Описание |
 | --- | --- | --- |

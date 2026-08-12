@@ -1,0 +1,55 @@
+# Запуск ГОТОВОГО образа из GHCR — для боевой машины.
+#
+# Этот файл не собирает образ, а скачивает опубликованный. На сервере нужны
+# только Docker, этот файл и .env с ключами. Исходный код не нужен вообще.
+#
+#   docker compose -f docker-compose.deploy.yml up -d
+#   docker compose -f docker-compose.deploy.yml logs -f
+#   docker compose -f docker-compose.deploy.yml pull && \
+#     docker compose -f docker-compose.deploy.yml up -d   # обновление
+name: serverbot
+
+services:
+  bot:
+    # Замените владельца/имя, если форкнули репозиторий.
+    # Вместо latest можно закрепить версию: ...:v1.0.0 или ...:sha-1a2b3c4
+    image: ghcr.io/jadykov/serverbot:latest
+    container_name: serverbot
+    restart: unless-stopped
+
+    # Все ключи и настройки берутся из .env рядом с этим файлом.
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 3000
+
+    # Порт наружу не нужен: бот сам ходит к Telegram (long polling).
+    # Раскомментируйте, если хотите дёргать /health с самого хоста.
+    # ports:
+    #   - "127.0.0.1:3000:3000"
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    deploy:
+      resources:
+        limits:
+          memory: 512M

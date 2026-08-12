@@ -1,0 +1,82 @@
+# Сборка Docker-образа и публикация в GitHub Container Registry (ghcr.io).
+#
+# Запускается автоматически при пуше в main и при создании тега вида v1.2.3,
+# а также вручную — вкладка Actions → Run workflow.
+#
+# Токен для публикации создавать НЕ нужно: GitHub сам выдаёт workflow
+# временный GITHUB_TOKEN, которому достаточно прав packages: write.
+name: Публикация образа в GHCR
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  # github.repository — это «владелец/репозиторий», то есть итоговый образ
+  # будет называться ghcr.io/<владелец>/<репозиторий>.
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Забрать код
+        uses: actions/checkout@v4
+
+      # QEMU нужен, чтобы на amd64-раннере собрать ещё и arm64-образ
+      # (VM на AWS Graviton, Oracle Ampere, Hetzner ARM и т.п.).
+      - name: Настроить QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Настроить Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Войти в GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Готовит список тегов и OCI-метки. Метка org.opencontainers.image.source
+      # привязывает пакет к репозиторию — благодаря ей образ виден на странице репо.
+      - name: Подготовить теги и метки
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Собрать и запушить
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          # Уберите linux/arm64, если ARM-машины не нужны — сборка станет быстрее.
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Кэш слоёв между запусками: повторные сборки идут в разы быстрее.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Показать, что опубликовано
+        run: |
+          echo "Опубликованные теги:"
+          echo "${{ steps.meta.outputs.tags }}"
+          echo ""
+          echo "Запуск на любой машине с Docker:"
+          echo "  docker run -d --env-file .env ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"

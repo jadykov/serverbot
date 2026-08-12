@@ -30,7 +30,15 @@
       "Bash(git config *)",
       "Bash(git check-ignore *)",
       "Bash(git checkout *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(timeout 120 git push -u origin feature/gem-command-groups-markdown)",
+      "Bash(git fetch *)",
+      "Bash(docker buildx *)",
+      "Bash(docker version *)",
+      "Read(//home/claude_cli/.docker/**)",
+      "Bash(docker-credential-desktop.exe list *)",
+      "Bash(timeout 60 docker pull ghcr.io/jadykov/serverbot:latest)",
+      "Bash(python3 -c ' *)"
     ]
   }
 }
