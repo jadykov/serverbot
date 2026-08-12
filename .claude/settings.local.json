@@ -23,7 +23,14 @@
       "Bash(node -p \"require\\('./node_modules/@google/genai/package.json'\\).version\")",
       "Bash(node *)",
       "Bash(sed -i 's/slice\\(0, 220\\)/slice\\(0, 900\\)/' /tmp/claude-1000/-home-claude-cli-serverbot/57cc7a61-5090-4faa-9504-63db5264d4ef/scratchpad/smoke-ai.mjs)",
-      "Bash(sed -i \"s|await send\\('/ask.*||; s|await send\\('а если.*||\" /tmp/claude-1000/-home-claude-cli-serverbot/57cc7a61-5090-4faa-9504-63db5264d4ef/scratchpad/smoke-ai.mjs)"
+      "Bash(sed -i \"s|await send\\('/ask.*||; s|await send\\('а если.*||\" /tmp/claude-1000/-home-claude-cli-serverbot/57cc7a61-5090-4faa-9504-63db5264d4ef/scratchpad/smoke-ai.mjs)",
+      "Bash(python3 -)",
+      "Bash(timeout 540 docker build -t serverbot:check .)",
+      "Bash(gh auth *)",
+      "Bash(git config *)",
+      "Bash(git check-ignore *)",
+      "Bash(git checkout *)",
+      "Bash(git add *)"
     ]
   }
 }

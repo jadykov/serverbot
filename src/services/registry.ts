@@ -21,6 +21,14 @@ export const DEFAULT_TEXT_PROVIDER_ID = textProviders[0]?.id ?? 'gemini';
 export const DEFAULT_IMAGE_PROVIDER_ID = imageProviders[0]?.id ?? 'fusionbrain';
 
 /**
+ * Находит текстовый провайдер по id — даже если он не настроен.
+ * Нужен командам, которые привязаны к конкретной нейросети (например, /гем).
+ */
+export function findTextProvider(id: string): TextProvider | undefined {
+  return textProviders.find((provider) => provider.id === id);
+}
+
+/**
  * Возвращает текстовый провайдер по id. Если он не настроен (нет ключей) —
  * молча подставляет первый настроенный. Если настроенных нет вовсе —
  * бросает ProviderNotConfiguredError со списком подсказок.
