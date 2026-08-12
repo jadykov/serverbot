@@ -38,7 +38,8 @@
       "Read(//home/claude_cli/.docker/**)",
       "Bash(docker-credential-desktop.exe list *)",
       "Bash(timeout 60 docker pull ghcr.io/jadykov/serverbot:latest)",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Bash(timeout 120 git push)"
     ]
   }
 }

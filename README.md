@@ -380,6 +380,11 @@ git push
 занимает ~5 минут (arm64 собирается через эмуляцию), последующие — быстрее
 за счёт кэша слоёв.
 
+> В приватных репозиториях сборки расходуют бесплатные минуты Actions
+> (2000 в месяц на бесплатном тарифе). Для публичных репозиториев Actions
+> бесплатны без лимита. Если минут жалко — уберите `linux/arm64`
+> из `platforms` или публикуйте образ вручную (способ 2).
+
 Теги, которые создаёт workflow:
 
 | Тег | Когда появляется | Пример |
@@ -443,17 +448,35 @@ docker pull ghcr.io/jadykov/serverbot:latest
 # 1. Docker
 curl -fsSL https://get.docker.com | sudo sh
 sudo usermod -aG docker $USER && exit   # перелогиньтесь
+```
 
-# 2. Каталог и конфигурация
-mkdir -p ~/serverbot && cd ~/serverbot
+```bash
+# 2. Скопировать конфигурацию с рабочей машины
+scp docker-compose.deploy.yml .env.example user@сервер:~/serverbot/
+```
+
+Репозиторий приватный, поэтому скачать файлы через `curl` с
+`raw.githubusercontent.com` не получится — только `scp`, `git clone` с ключом
+или просто вставить содержимое в редакторе. Если сделаете репозиторий публичным,
+сработает и такой вариант:
+
+```bash
 curl -O https://raw.githubusercontent.com/jadykov/serverbot/main/docker-compose.deploy.yml
-curl -o .env https://raw.githubusercontent.com/jadykov/serverbot/main/.env.example
-nano .env                                # впишите BOT_TOKEN и ключи нейросетей
+```
 
-# 3. Запуск
+```bash
+# 3. Ключи и запуск
+cd ~/serverbot
+mv .env.example .env && nano .env        # впишите BOT_TOKEN и ключи нейросетей
+chmod 600 .env
+
 docker compose -f docker-compose.deploy.yml up -d
 docker compose -f docker-compose.deploy.yml logs -f
 ```
+
+Обратите внимание: **сам образ публичный, а репозиторий может оставаться
+приватным** — видимость пакета в GHCR настраивается отдельно от репозитория.
+Ключей внутри образа нет, они подставляются из `.env` при запуске.
 
 Обновление до свежего образа:
 
