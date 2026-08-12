@@ -683,6 +683,7 @@ GEMINI_THINKING=                 # пустое значение = «не зад
 | `GEMINI_API_KEY` | — | Ключ Google Gemini |
 | `GEMINI_MODEL` | `gemini-flash-latest` | Модель Gemini (алиас или закреплённая версия) |
 | `GEMINI_THINKING` | — | «Размышления»: число (бюджет токенов, Gemini 2.5) или `minimal`/`low`/`medium`/`high` (Gemini 3.x). Пусто — параметр не отправляется |
+| `GEMINI_BASE_URL` | — | Адрес прокси вместо `generativelanguage.googleapis.com`. Нужен, если Google не обслуживает IP сервера |
 | `OPENAI_API_KEY` | — | Ключ OpenAI-совместимого API |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Базовый URL этого API |
 | `OPENAI_MODEL` | `gpt-4o-mini` | Модель |
@@ -766,6 +767,53 @@ export const textProviders: TextProvider[] = [
 у Gemini 3.x — уровнем (`thinkingLevel`), и значение «не от того поколения»
 модель отвергает. Оставьте `GEMINI_THINKING` пустым — тогда параметр не
 отправляется вовсе и запрос корректен для любой модели.
+
+**`User location is not supported for the API use` (400)**
+Google отклоняет запрос по **IP-адресу отправителя**, а не по ключу и не по
+настройкам. Он блокирует диапазоны многих хостингов целиком: массово
+сообщают про Hetzner, часть французских и даже американских VPS. Локально при
+этом всё работает — потому что запрос уходит с другого адреса.
+
+Как убедиться, что дело именно в адресе: выполните один и тот же запрос
+с сервера и с домашней машины —
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST \
+  "https://generativelanguage.googleapis.com/v1beta/models/$GEMINI_MODEL:generateContent" \
+  -H "x-goog-api-key: $GEMINI_API_KEY" -H 'content-type: application/json' \
+  -d '{"contents":[{"role":"user","parts":[{"text":"привет"}]}]}'
+```
+
+`200` дома и `400` на сервере — вопрос закрыт, проблема в IP. Варианты:
+
+1. **Прокси в разрешённом регионе.** Поднимите тонкий релей (Cloudflare Worker,
+   Vercel Function, любой VPS в США) и укажите его в `.env`:
+   `GEMINI_BASE_URL=https://ваш-прокси`. Минимальный воркер — просто подмена хоста:
+
+   ```js
+   export default {
+     async fetch(request) {
+       const url = new URL(request.url);
+       url.host = 'generativelanguage.googleapis.com';
+       return fetch(new Request(url, request));
+     },
+   };
+   ```
+
+   Важно: помогает, только если у самого прокси адрес в поддерживаемом регионе —
+   serverless-платформы стоит явно привязать к региону США.
+
+2. **Другой провайдер вместо Gemini.** В боте уже есть OpenAI-совместимый
+   клиент: например, OpenRouter отдаёт те же модели Gemini и не блокирует VPS.
+   В `.env`: `OPENAI_BASE_URL=https://openrouter.ai/api/v1`,
+   `OPENAI_API_KEY=...`, `OPENAI_MODEL=google/gemini-2.5-flash`. Работать будет
+   команда `/ask` (`/гем` жёстко привязана к прямому API Google).
+
+3. **Сменить хостинг.** Лотерея: у одного провайдера блок, у соседнего нет,
+   иногда различаются даже площадки одного провайдера.
+
+Оплата тарифа проблему не гарантирует: есть сообщения, что и платные ключи
+отклоняются с тех же адресов.
 
 **`Модель «...» недоступна для вашего ключа` (404)**
 Опечатка в `GEMINI_MODEL` либо модель вывели из обращения — Google периодически

@@ -93,7 +93,14 @@ export class GeminiProvider implements TextProvider {
 
   private getClient(): GoogleGenAI {
     if (!this.client) {
-      this.client = new GoogleGenAI({ apiKey: config.gemini.apiKey });
+      this.client = new GoogleGenAI({
+        apiKey: config.gemini.apiKey,
+        // Если задан GEMINI_BASE_URL — ходим через свой прокси.
+        ...(config.gemini.baseUrl ? { httpOptions: { baseUrl: config.gemini.baseUrl } } : {}),
+      });
+      if (config.gemini.baseUrl) {
+        logger.info('Gemini: запросы идут через прокси', { baseUrl: config.gemini.baseUrl });
+      }
     }
     return this.client;
   }
@@ -175,6 +182,23 @@ export class GeminiProvider implements TextProvider {
       const { text, code, status } = extractApiError(raw);
 
       logger.warn('Gemini вернул ошибку', { model: config.gemini.model, code, status, text });
+
+      // Географическая блокировка. Google отклоняет запрос по IP отправителя,
+      // а не по ключу: диапазоны многих хостингов у него в чёрном списке.
+      // Ошибка приходит с кодом 400, но с настройками бота никак не связана.
+      if (/location is not supported/i.test(text)) {
+        throw new ProviderRequestError(
+          this.id,
+          'Google не обслуживает запросы с IP этого сервера («User location is not supported»).\n\n' +
+            'Дело не в ключе и не в .env — тот же ключ работает с машины в другой сети. ' +
+            'Google блокирует диапазоны многих хостингов целиком.\n\n' +
+            'Что можно сделать:\n' +
+            '• поднять прокси в разрешённом регионе и указать его в GEMINI_BASE_URL;\n' +
+            '• переключиться на OpenAI-совместимый провайдер (OPENAI_BASE_URL, например OpenRouter) и команду /ask;\n' +
+            '• перенести бота на хостинг с другим диапазоном адресов.',
+          { cause: error },
+        );
+      }
 
       // 400: чаще всего в запрос попал параметр, которого модель не понимает.
       if (code === 400 || status === 'INVALID_ARGUMENT') {

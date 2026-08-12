@@ -39,7 +39,10 @@
       "Bash(docker-credential-desktop.exe list *)",
       "Bash(timeout 60 docker pull ghcr.io/jadykov/serverbot:latest)",
       "Bash(python3 -c ' *)",
-      "Bash(timeout 120 git push)"
+      "Bash(timeout 120 git push)",
+      "Bash(timeout 90 docker pull ghcr.io/jadykov/serverbot:latest)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('страна:', d.get\\('country'\\), '| провайдер:', d.get\\('org'\\)\\)\")",
+      "WebSearch"
     ]
   }
 }

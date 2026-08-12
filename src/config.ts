@@ -120,6 +120,12 @@ export const config = {
      * (безопасно для любой модели). Подробности — в src/services/gemini.ts.
      */
     thinking: env('GEMINI_THINKING') ?? '',
+    /**
+     * Свой адрес API вместо стандартного generativelanguage.googleapis.com.
+     * Нужен, когда Google не обслуживает IP сервера («User location is not
+     * supported»): запросы направляются через прокси в разрешённом регионе.
+     */
+    baseUrl: (env('GEMINI_BASE_URL') ?? '').replace(/\/+$/, ''),
   },
 
   openai: {
