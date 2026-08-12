@@ -1,0 +1,28 @@
+{
+  "name": "serverbot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Телеграм-бот на Node.js + TypeScript с подключением нескольких нейросетей (Gemini, OpenAI-совместимые API, FusionBrain/Kandinsky)",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "tsx watch --clear-screen=false src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@google/genai": "^1.31.0",
+    "@grammyjs/runner": "^2.0.3",
+    "dotenv": "^16.4.7",
+    "grammy": "^1.39.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

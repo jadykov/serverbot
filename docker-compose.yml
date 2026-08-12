@@ -1,0 +1,62 @@
+# Production-окружение.
+#
+#   docker compose up -d --build   — собрать и запустить в фоне
+#   docker compose logs -f bot     — смотреть логи
+#   docker compose ps              — статус и результат health-check
+#   docker compose down            — остановить и удалить контейнеры
+#
+# Бот работает через long polling: сам ходит к Telegram по исходящему
+# соединению. Ни домена, ни белого IP, ни проброшенных портов не нужно.
+name: serverbot
+
+services:
+  bot:
+    build:
+      context: .
+      target: runtime
+    image: serverbot:latest
+    container_name: serverbot
+    # Контейнер сам поднимется после падения и после перезагрузки сервера.
+    restart: unless-stopped
+
+    # Все переменные берутся из .env рядом с этим файлом.
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      # Внутри контейнера всегда слушаем 0.0.0.0:3000 — этот порт
+      # использует только health-check, наружу он не публикуется.
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 3000
+
+    # Порт виден только на localhost хоста: снаружи к боту не подключиться,
+    # но `curl http://127.0.0.1:3000/health` с самого сервера работает.
+    # Строку можно смело удалить — на работу бота она не влияет.
+    ports:
+      - "127.0.0.1:3000:3000"
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    # Логи не должны съесть диск на маленьком VPS.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Разумный лимит для небольшого VPS: боту хватает 256–512 МБ.
+    deploy:
+      resources:
+        limits:
+          memory: 512M

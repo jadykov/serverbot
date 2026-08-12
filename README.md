@@ -1,0 +1,489 @@
+# Telegram-бот на Node.js + TypeScript с нейросетями
+
+Учебно-боевой пример телеграм-бота: несколько команд, подключение сразу нескольких
+нейросетей (текст и картинки), Docker, health-check, graceful shutdown и подробные
+комментарии в коде на русском языке.
+
+* **Текст** — Google Gemini и любой OpenAI-совместимый API (OpenAI, OpenRouter, DeepSeek, Ollama…).
+* **Картинки** — FusionBrain (модель Kandinsky).
+* **Тестовые команды** в стиле «Марко-Поло» — чтобы за 5 секунд убедиться, что бот жив.
+
+> **Бот работает через long polling** — сам опрашивает Telegram по исходящему
+> соединению. Поэтому ему не нужны ни домен, ни белый IP, ни сертификат, ни
+> проброшенные порты: он одинаково запускается дома за NAT, в WSL и на любом VPS.
+
+---
+
+## Содержание
+
+1. [Команды бота](#команды-бота)
+2. [Структура проекта](#структура-проекта)
+3. [Шаг 0. Получаем ключи](#шаг-0-получаем-ключи)
+4. [Запуск без Docker: dev](#запуск-без-docker-dev)
+5. [Запуск без Docker: production](#запуск-без-docker-production)
+6. [Запуск в Docker: dev](#запуск-в-docker-dev)
+7. [Запуск в Docker: production](#запуск-в-docker-production)
+8. [Деплой на удалённый сервер](#деплой-на-удалённый-сервер)
+9. [Как проверить, что всё работает](#как-проверить-что-всё-работает)
+10. [Переменные окружения](#переменные-окружения)
+11. [Как добавить свою нейросеть](#как-добавить-свою-нейросеть)
+12. [Траблшутинг](#траблшутинг)
+
+---
+
+## Команды бота
+
+| Команда | Что делает |
+| --- | --- |
+| `/start`, `/help` | Приветствие и справка |
+| `/ask <вопрос>` | Вопрос текстовой нейросети (с учётом истории диалога) |
+| `/draw <описание>` | Сгенерировать картинку через FusionBrain/Kandinsky |
+| `/ai` | Показать провайдеров и переключить активного кнопками |
+| `/reset` | Очистить историю диалога |
+| `/ping` | «Pong» + реальная задержка до Telegram API + аптайм |
+| `/marco` | Отвечает `Polo!` — простейшая проверка живости |
+| `/polo` | Отвечает `Marco!` |
+| `/echo <текст>` | Повторяет текст слово в слово |
+| `/test` | Самодиагностика: связь с Telegram + готовность провайдеров |
+| `/test ai` | То же самое плюс настоящий короткий запрос к нейросети |
+| `/whoami` | Ваши user id и chat id (нужны для `ADMIN_IDS`) |
+| `/status` | Режим работы, аптайм, память, активные провайдеры |
+
+Дополнительно: слово **marco** обычным сообщением (без слэша) тоже получит `Polo!`,
+а в личке любой текст без команды уходит в текстовую нейросеть как вопрос.
+
+---
+
+## Структура проекта
+
+```
+serverbot/
+├── src/
+│   ├── index.ts               # точка входа: старт polling и graceful shutdown
+│   ├── bot.ts                 # сборка бота: middleware, команды, обработка ошибок
+│   ├── server.ts              # маленький HTTP-сервер только с /health
+│   ├── config.ts              # вся конфигурация из переменных окружения
+│   ├── logger.ts              # логгер (JSON в проде, цветной в разработке)
+│   ├── types.ts               # интерфейсы провайдеров, сессия, типы ошибок
+│   ├── utils.ts               # таймауты, нарезка длинных сообщений, «печатает…»
+│   ├── commands/
+│   │   ├── basic.ts           # /start /help /ping /marco /echo /test /whoami /status
+│   │   └── ai.ts              # /ask /draw /ai /reset + обработка обычных сообщений
+│   ├── middlewares/
+│   │   ├── logging.ts         # лог каждого апдейта и времени обработки
+│   │   └── rateLimit.ts       # защита от спама
+│   └── services/
+│       ├── registry.ts        # реестр провайдеров — единственное место для новых ИИ
+│       ├── gemini.ts          # Google Gemini
+│       ├── openai-compatible.ts # OpenAI / OpenRouter / DeepSeek / Ollama…
+│       └── fusionbrain.ts     # FusionBrain (Kandinsky), генерация картинок
+├── Dockerfile                 # multi-stage: dev / build / runtime
+├── docker-compose.yml         # production
+├── docker-compose.dev.yml     # разработка с hot-reload
+└── .env.example               # шаблон конфигурации
+```
+
+**Главная идея архитектуры:** бот не знает, с какой нейросетью работает. Он видит только
+интерфейсы `TextProvider` и `ImageProvider` из `src/types.ts`. Чтобы добавить ещё одну
+модель, достаточно написать класс и вписать его в `src/services/registry.ts`.
+
+---
+
+## Шаг 0. Получаем ключи
+
+### 1. Токен бота (обязательно)
+
+1. Откройте в Telegram [@BotFather](https://t.me/BotFather) → `/newbot`.
+2. Придумайте имя и username (должен заканчиваться на `bot`).
+3. Скопируйте токен вида `1234567890:AAH...`.
+
+Полезно там же: `/setdescription`, `/setuserpic`, а для работы в группах —
+`/setprivacy` → `Disable`, иначе бот не увидит обычные сообщения в группе.
+
+### 2. Google Gemini (текст, бесплатный тариф)
+
+Ключ: <https://aistudio.google.com/apikey> → `GEMINI_API_KEY`.
+
+Посмотреть модели, доступные именно вашему ключу:
+
+```bash
+curl -s -H "x-goog-api-key: $GEMINI_API_KEY" \
+  https://generativelanguage.googleapis.com/v1beta/models | grep '"name"'
+```
+
+### 3. FusionBrain / Kandinsky (картинки, бесплатный тариф)
+
+Ключи: <https://fusionbrain.ai/keys> → там выдают **пару**: `FUSIONBRAIN_API_KEY` и
+`FUSIONBRAIN_SECRET_KEY`.
+
+### 4. OpenAI-совместимый провайдер (опционально)
+
+Любой сервис с эндпоинтом `/v1/chat/completions`: OpenAI, OpenRouter, DeepSeek,
+локальная Ollama. Заполните `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`.
+
+> Любой блок ключей можно оставить пустым — соответствующая команда просто ответит
+> подсказкой, что именно нужно добавить в `.env`. Обязателен только `BOT_TOKEN`.
+
+---
+
+## Запуск без Docker: dev
+
+Нужен **Node.js 20+** (проверить: `node -v`).
+
+```bash
+# 1. Зависимости
+npm install
+
+# 2. Конфигурация
+cp .env.example .env
+nano .env          # впишите как минимум BOT_TOKEN
+
+# 3. Запуск с автоперезагрузкой при изменении файлов
+npm run dev
+```
+
+В консоли появится:
+
+```
+INFO  Бот @your_bot инициализирован
+INFO  HTTP-сервер слушает { port: 3000, health: 'http://0.0.0.0:3000/health' }
+INFO  Long polling запущен
+INFO  ✅ Бот готов к работе
+```
+
+Откройте бота в Telegram и отправьте `/marco` — придёт `🌊 Polo!`.
+
+Полезные команды:
+
+```bash
+npm run typecheck   # проверить типы без сборки
+npm run build       # скомпилировать TypeScript в dist/
+npm start           # запустить уже собранный код
+```
+
+---
+
+## Запуск без Docker: production
+
+```bash
+npm ci                  # ставим все зависимости: TypeScript нужен для сборки
+npm run build           # компиляция src/ → dist/
+npm prune --omit=dev    # опционально: выкинуть dev-зависимости после сборки
+NODE_ENV=production npm start
+```
+
+Чтобы бот пережил перезагрузку сервера, оформите его как сервис systemd.
+
+**`/etc/systemd/system/serverbot.service`:**
+
+```ini
+[Unit]
+Description=Telegram AI bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deploy
+WorkingDirectory=/opt/serverbot
+EnvironmentFile=/opt/serverbot/.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=5
+# Немного безопасности: боту не нужен доступ ко всей файловой системе
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now serverbot
+sudo systemctl status serverbot
+journalctl -u serverbot -f          # логи в реальном времени
+```
+
+Альтернатива без systemd — **pm2**:
+
+```bash
+npm i -g pm2
+pm2 start dist/index.js --name serverbot --time
+pm2 logs serverbot
+pm2 save && pm2 startup             # автозапуск после ребута
+```
+
+---
+
+## Запуск в Docker: dev
+
+Код монтируется с хоста, `tsx watch` перезапускает бота при каждом сохранении файла.
+
+```bash
+cp .env.example .env    # если ещё не сделали
+docker compose -f docker-compose.dev.yml up --build
+```
+
+Остановить — `Ctrl+C` или:
+
+```bash
+docker compose -f docker-compose.dev.yml down
+```
+
+---
+
+## Запуск в Docker: production
+
+```bash
+cp .env.example .env
+nano .env
+
+docker compose up -d --build      # собрать и запустить в фоне
+docker compose logs -f bot        # смотреть логи
+docker compose ps                 # статус и health-check
+curl http://127.0.0.1:3000/health # проверка живости
+```
+
+Ответ health-check:
+
+```json
+{"status":"ok","env":"production","uptimeSec":42,
+ "bot":"your_bot","providers":[{"id":"gemini","ready":true}]}
+```
+
+Управление:
+
+```bash
+docker compose restart bot        # перезапустить
+docker compose down               # остановить и удалить контейнеры
+docker compose up -d --build      # обновить после изменения кода
+docker compose pull && docker compose up -d   # обновить базовые образы
+```
+
+Что уже сделано за вас в `Dockerfile` и `docker-compose.yml`:
+
+* multi-stage сборка — в финальном образе нет ни исходников, ни TypeScript (~276 МБ);
+* запуск от непривилегированного пользователя `node`, а не от root;
+* `tini` как init — `docker stop` корректно доходит до Node, бот завершается штатно;
+* `restart: unless-stopped` — переживает падение и перезагрузку сервера;
+* health-check, ротация логов (3 файла по 10 МБ), лимит памяти 512 МБ;
+* порт `3000` публикуется **только на 127.0.0.1** и нужен исключительно
+  для health-check — снаружи бот недоступен, входящие соединения ему не нужны.
+
+---
+
+## Деплой на удалённый сервер
+
+Подойдёт любой VPS с 1 ГБ RAM. Ниже — вариант «Ubuntu + Docker».
+
+### 1. Установить Docker на сервере
+
+```bash
+ssh user@your-server-ip
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker $USER && exit     # перелогиньтесь, чтобы группа применилась
+```
+
+### 2. Доставить код
+
+Вариант А — через git (удобно обновлять):
+
+```bash
+ssh user@your-server-ip
+git clone <адрес-вашего-репозитория> /opt/serverbot
+cd /opt/serverbot
+```
+
+Вариант Б — скопировать с локальной машины:
+
+```bash
+# node_modules и dist не копируем — они соберутся в образе
+rsync -av --exclude node_modules --exclude dist --exclude .git \
+      ./ user@your-server-ip:/opt/serverbot/
+```
+
+### 3. Настроить и запустить
+
+```bash
+cd /opt/serverbot
+cp .env.example .env
+nano .env                    # BOT_TOKEN и ключи нейросетей
+docker compose up -d --build
+docker compose logs -f bot
+```
+
+### 4. Обновление после изменений
+
+```bash
+cd /opt/serverbot
+git pull                     # или повторный rsync
+docker compose up -d --build
+```
+
+### 5. Файрвол
+
+Боту нужны только **исходящие** соединения к `api.telegram.org` и к API нейросетей,
+поэтому входящие порты открывать не нужно вообще — достаточно оставить SSH:
+
+```bash
+sudo ufw allow OpenSSH
+sudo ufw enable
+```
+
+> **Важно:** один и тот же токен нельзя использовать двумя запущенными ботами
+> одновременно — Telegram будет отдавать ошибку `409 Conflict`. Останавливайте
+> локальный `npm run dev`, пока бот работает на сервере (или заведите второго
+> тестового бота у @BotFather).
+
+---
+
+## Как проверить, что всё работает
+
+По возрастанию сложности — так проще всего понять, на каком уровне сломалось:
+
+1. **Процесс жив:** `curl http://127.0.0.1:3000/health` → `{"status":"ok",...}`
+2. **Апдейты доходят:** отправьте боту `/marco` → `🌊 Polo!`
+   (или просто напишите `marco` без слэша)
+3. **Ответы уходят и Telegram отвечает быстро:** `/ping` → задержка в миллисекундах
+4. **Текст передаётся без искажений:** `/echo привет, мир` → `привет, мир`
+5. **Ключи и конфигурация на месте:** `/test` → список ✅/⚪️ по каждому провайдеру
+6. **Нейросеть реально отвечает:** `/test ai` → живой запрос к модели
+7. **Основной сценарий:** `/ask расскажи анекдот про программиста`
+8. **Картинки:** `/draw кот-космонавт, акварель`
+
+---
+
+## Переменные окружения
+
+| Переменная | По умолчанию | Описание |
+| --- | --- | --- |
+| `BOT_TOKEN` | — | **Обязательно.** Токен от @BotFather |
+| `DROP_PENDING_UPDATES` | `true` | Игнорировать апдейты, накопившиеся за простой |
+| `SERVER_HOST` / `SERVER_PORT` | `0.0.0.0` / `3000` | Адрес HTTP-сервера с `/health` |
+| `GEMINI_API_KEY` | — | Ключ Google Gemini |
+| `GEMINI_MODEL` | `gemini-flash-latest` | Модель Gemini (алиас или закреплённая версия) |
+| `GEMINI_THINKING` | — | «Размышления»: число (бюджет токенов, Gemini 2.5) или `minimal`/`low`/`medium`/`high` (Gemini 3.x). Пусто — параметр не отправляется |
+| `OPENAI_API_KEY` | — | Ключ OpenAI-совместимого API |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Базовый URL этого API |
+| `OPENAI_MODEL` | `gpt-4o-mini` | Модель |
+| `FUSIONBRAIN_API_KEY` | — | Ключ FusionBrain |
+| `FUSIONBRAIN_SECRET_KEY` | — | Секрет FusionBrain |
+| `FUSIONBRAIN_WIDTH` / `_HEIGHT` | `1024` | Размер картинки |
+| `ADMIN_IDS` | — | ID админов через запятую (узнать: `/whoami`) |
+| `RATE_LIMIT_MAX` | `15` | Запросов на пользователя за окно |
+| `RATE_LIMIT_WINDOW_MS` | `60000` | Длина окна, мс |
+| `HISTORY_LIMIT` | `10` | Сообщений диалога в контексте (`0` — без истории) |
+| `AI_TIMEOUT_MS` | `90000` | Таймаут запроса к нейросети |
+| `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
+
+---
+
+## Как добавить свою нейросеть
+
+1. Создайте `src/services/my-ai.ts` и реализуйте интерфейс `TextProvider`
+   (или `ImageProvider`) из `src/types.ts`:
+
+```ts
+export class MyProvider implements TextProvider {
+  readonly id = 'myai';
+  readonly title = 'Моя нейросеть';
+  readonly setupHint = 'Добавьте MYAI_API_KEY в .env';
+
+  get isConfigured(): boolean {
+    return Boolean(process.env.MYAI_API_KEY);
+  }
+
+  async generateText(prompt: string): Promise<string> {
+    /* запрос к вашему API */
+    return 'ответ';
+  }
+}
+```
+
+2. Добавьте её в массив в `src/services/registry.ts`:
+
+```ts
+export const textProviders: TextProvider[] = [
+  new GeminiProvider(),
+  new OpenAiCompatibleProvider(),
+  new MyProvider(),   // ← новая строка
+];
+```
+
+Всё: провайдер появится в `/ai`, `/status` и `/test`, а `/ask` сможет на него
+переключиться. Менять команды не нужно.
+
+---
+
+## Траблшутинг
+
+**`409 Conflict: terminated by other getUpdates request`**
+С одним токеном запущено два экземпляра бота. Остановите лишний
+(`docker compose down`, `pm2 stop`, локальный `npm run dev`) и подождите ~1 минуту.
+
+**`401 Unauthorized`**
+Неверный, отозванный или обрезанный `BOT_TOKEN`. Проверьте его в `.env`
+(без кавычек и пробелов), при необходимости получите новый: @BotFather → `/mybots`.
+
+**Бот запустился, но молчит**
+Если на этом токене когда-то настраивали приём апдейтов по HTTP-адресу, Telegram
+не отдаст их через `getUpdates`. Бот на старте сам сбрасывает такую настройку
+(`deleteWebhook` в `src/index.ts`), проверить можно так:
+`curl "https://api.telegram.org/bot<ТОКЕН>/getWebhookInfo"` — поле `url` должно быть пустым.
+
+**В группе бот не реагирует на обычные сообщения**
+Так задумано на уровне Telegram: включён privacy mode. Отключите его в @BotFather
+(`/setprivacy` → `Disable`) и **перезайдите ботом в группу**. Плюс сам бот
+намеренно отвечает в группах только на команды — см. конец `src/commands/ai.ts`.
+
+**`Gemini отклонил запрос (400): Request contains an invalid argument`**
+Модель не понимает какой-то параметр запроса. Практически всегда виноват
+`GEMINI_THINKING`: у Gemini 2.5 «размышления» задаются числом (`thinkingBudget`),
+у Gemini 3.x — уровнем (`thinkingLevel`), и значение «не от того поколения»
+модель отвергает. Оставьте `GEMINI_THINKING` пустым — тогда параметр не
+отправляется вовсе и запрос корректен для любой модели.
+
+**`Модель «...» недоступна для вашего ключа` (404)**
+Опечатка в `GEMINI_MODEL` либо модель вывели из обращения — Google периодически
+закрывает старые версии («no longer available to new users»). Посмотрите
+актуальный список (команда в разделе про ключи) или поставьте плавающий алиас
+`gemini-flash-latest`.
+
+**`Gemini отклонил ключ` / запросы к Gemini не проходят**
+Проверьте ключ в [AI Studio](https://aistudio.google.com/apikey). Учтите, что
+Gemini API доступен не во всех странах — на сервере в неподдерживаемом регионе
+запросы будут падать по таймауту или с ошибкой доступа. Решение: сервер в
+поддерживаемом регионе либо использование OpenAI-совместимого провайдера.
+
+**FusionBrain: «не принял задачу» или долгое ожидание**
+На бесплатном тарифе есть дневной лимит и общая очередь — генерация иногда занимает
+до минуты. Увеличьте `AI_TIMEOUT_MS`. Ошибка про цензуру означает, что промпт
+заблокирован фильтром сервиса — переформулируйте.
+
+**Внутри Docker не срабатывает hot-reload**
+Раскомментируйте `CHOKIDAR_USEPOLLING: "true"` в `docker-compose.dev.yml`
+(типично для WSL2 и сетевых файловых систем).
+
+**`Ошибки конфигурации: BOT_TOKEN не задан`**
+Нет файла `.env` рядом с `package.json` либо переменная пустая.
+`cp .env.example .env` и заполнить.
+
+**Слишком много логов / слишком мало**
+`LOG_LEVEL=debug` покажет каждый апдейт и тайминги запросов к нейросетям,
+`LOG_LEVEL=warn` оставит только проблемы.
+
+---
+
+## Шпаргалка
+
+```bash
+npm run dev                                        # разработка локально
+npm run build && npm start                         # прод локально
+docker compose -f docker-compose.dev.yml up --build  # разработка в Docker
+docker compose up -d --build                       # прод в Docker
+docker compose logs -f bot                         # логи
+curl http://127.0.0.1:3000/health                  # проверка живости
+```

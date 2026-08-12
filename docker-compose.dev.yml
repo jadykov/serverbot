@@ -1,0 +1,41 @@
+# Окружение для разработки: код монтируется с хоста,
+# tsx watch перезапускает бота при каждом сохранении файла.
+#
+#   docker compose -f docker-compose.dev.yml up --build
+#   docker compose -f docker-compose.dev.yml down
+name: serverbot-dev
+
+services:
+  bot:
+    build:
+      context: .
+      target: dev
+    image: serverbot:dev
+    container_name: serverbot-dev
+    # В разработке автоперезапуск только мешает читать ошибки.
+    restart: "no"
+
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: development
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 3000
+      LOG_LEVEL: debug
+      # Если файловый watcher не видит изменения (частая беда с WSL2
+      # и сетевыми ФС) — раскомментируйте строку ниже.
+      # CHOKIDAR_USEPOLLING: "true"
+
+    volumes:
+      # Монтируем только то, что реально редактируем.
+      # node_modules остаются «внутренними», из образа.
+      - ./src:/app/src
+      - ./tsconfig.json:/app/tsconfig.json
+      - ./package.json:/app/package.json
+
+    ports:
+      - "127.0.0.1:3000:3000"
+
+    # Чтобы Ctrl+C и цветной вывод работали как в обычном терминале.
+    stdin_open: true
+    tty: true

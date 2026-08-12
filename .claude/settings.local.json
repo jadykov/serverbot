@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm -v)",
+      "Bash(docker --version)",
+      "Bash(docker compose *)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(echo \"--- BUILD EXIT: $? ---\")",
+      "Bash(node dist/index.js)",
+      "Bash(node /tmp/claude-1000/-home-claude-cli-serverbot/57cc7a61-5090-4faa-9504-63db5264d4ef/scratchpad/smoke-http.mjs)",
+      "Bash(node -e \"console.log\\(require.resolve\\('grammy'\\)\\)\")",
+      "Bash(node --input-type=module -e \"import {createRequire} from 'node:module'; const r=createRequire\\('/home/claude_cli/serverbot/'\\); console.log\\(r.resolve\\('grammy'\\)\\)\")",
+      "Bash(node /tmp/claude-1000/-home-claude-cli-serverbot/57cc7a61-5090-4faa-9504-63db5264d4ef/scratchpad/smoke-commands.mjs)",
+      "Bash(npx tsx *)",
+      "Bash(timeout 8 npx tsx src/index.ts)",
+      "Bash(timeout 540 docker build -t serverbot:test .)",
+      "Bash(docker run *)",
+      "Bash(BOT_TOKEN=123456789:AAFakeTokenForLocalCheck_0000000000 node dist/index.js)",
+      "Bash(docker rmi *)",
+      "Bash(timeout 540 docker build -t serverbot:latest .)",
+      "Bash(node --env-file=.env /tmp/claude-1000/-home-claude-cli-serverbot/57cc7a61-5090-4faa-9504-63db5264d4ef/scratchpad/gemini-diag.mjs)",
+      "Bash(node -p \"require\\('./node_modules/@google/genai/package.json'\\).version\")",
+      "Bash(node *)",
+      "Bash(sed -i 's/slice\\(0, 220\\)/slice\\(0, 900\\)/' /tmp/claude-1000/-home-claude-cli-serverbot/57cc7a61-5090-4faa-9504-63db5264d4ef/scratchpad/smoke-ai.mjs)",
+      "Bash(sed -i \"s|await send\\('/ask.*||; s|await send\\('а если.*||\" /tmp/claude-1000/-home-claude-cli-serverbot/57cc7a61-5090-4faa-9504-63db5264d4ef/scratchpad/smoke-ai.mjs)"
+    ]
+  }
+}

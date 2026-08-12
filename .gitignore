@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.log
+npm-debug.log*
+
+# Секреты — в git не попадают никогда
+.env
+.env.local
+.env.*.local
+!.env.example
+
+.DS_Store
+.idea/
+.vscode/
+coverage/
+tmp/
