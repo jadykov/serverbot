@@ -33,7 +33,24 @@ export class OpenAiCompatibleProvider implements TextProvider {
       throw new ProviderRequestError(this.id, this.setupHint);
     }
 
-    const messages = [
+    // Картинки в этом протоколе передаются внутри content как data-URL.
+    // Пока вложений нет, content остаётся обычной строкой: так понимают
+    // даже старые и урезанные реализации OpenAI-совместимого API.
+    const attachments = options.attachments ?? [];
+    const userContent: unknown =
+      attachments.length > 0
+        ? [
+            { type: 'text', text: prompt },
+            ...attachments.map((attachment) => ({
+              type: 'image_url',
+              image_url: {
+                url: `data:${attachment.mimeType};base64,${attachment.data.toString('base64')}`,
+              },
+            })),
+          ]
+        : prompt;
+
+    const messages: Array<{ role: string; content: unknown }> = [
       {
         role: 'system',
         content:
@@ -43,9 +60,10 @@ export class OpenAiCompatibleProvider implements TextProvider {
             'Без таблиц, вложенных списков и HTML-тегов.',
       },
       ...(options.history ?? []).map((message) => ({ role: message.role, content: message.text })),
-      { role: 'user', content: prompt },
+      { role: 'user', content: userContent },
     ];
 
+    const model = options.model ?? config.openai.model;
     const startedAt = Date.now();
 
     let response: Response;
@@ -57,7 +75,7 @@ export class OpenAiCompatibleProvider implements TextProvider {
           authorization: `Bearer ${config.openai.apiKey}`,
         },
         body: JSON.stringify({
-          model: config.openai.model,
+          model,
           messages,
           temperature: options.temperature ?? 0.8,
           max_tokens: options.maxOutputTokens ?? 2048,
@@ -89,9 +107,10 @@ export class OpenAiCompatibleProvider implements TextProvider {
     }
 
     logger.debug('OpenAI-совместимый API: ответ получен', {
-      model: config.openai.model,
+      model,
       ms: Date.now() - startedAt,
       chars: text.length,
+      attachments: attachments.length,
     });
 
     return text;

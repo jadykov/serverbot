@@ -55,6 +55,11 @@ ENV NODE_ENV=production
 COPY --chown=node:node package.json ./
 COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
+# Каталог для сессий создаём заранее и отдаём пользователю node. Это важно
+# именно для тома: пустой named volume Docker инициализирует правами того
+# каталога, поверх которого монтирует. Не создай мы его — том оказался бы
+# root-овым, и бот не смог бы записать ни одной сессии.
+RUN mkdir -p /app/data && chown -R node:node /app/data
 USER node
 EXPOSE 3000
 ENTRYPOINT ["/sbin/tini", "--"]

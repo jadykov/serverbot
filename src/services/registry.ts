@@ -7,18 +7,22 @@
  */
 import { GeminiProvider } from './gemini.js';
 import { OpenAiCompatibleProvider } from './openai-compatible.js';
-import { FusionBrainProvider } from './fusionbrain.js';
+import { OpenRouterImageProvider } from './openrouter-image.js';
 import { ProviderNotConfiguredError, type ImageProvider, type TextProvider } from '../types.js';
 
 /** Текстовые нейросети. Первый настроенный в списке используется по умолчанию. */
 export const textProviders: TextProvider[] = [new GeminiProvider(), new OpenAiCompatibleProvider()];
 
-/** Нейросети, рисующие картинки. */
-export const imageProviders: ImageProvider[] = [new FusionBrainProvider()];
+/**
+ * Нейросети, рисующие картинки. Здесь только платный OpenRouter: бесплатной
+ * генерации изображений в Gemini API не существует — см. комментарий
+ * в src/services/openrouter-image.ts.
+ */
+export const imageProviders: ImageProvider[] = [new OpenRouterImageProvider()];
 
 /** id провайдера, который подставляется в новую сессию. */
 export const DEFAULT_TEXT_PROVIDER_ID = textProviders[0]?.id ?? 'gemini';
-export const DEFAULT_IMAGE_PROVIDER_ID = imageProviders[0]?.id ?? 'fusionbrain';
+export const DEFAULT_IMAGE_PROVIDER_ID = imageProviders[0]?.id ?? 'openrouter';
 
 /**
  * Находит текстовый провайдер по id — даже если он не настроен.

@@ -9,6 +9,9 @@ npm-debug.log*
 .env.*.local
 !.env.example
 
+# Сессии и накопленное состояние бота — это данные, а не исходники
+data/
+
 .DS_Store
 .idea/
 .vscode/

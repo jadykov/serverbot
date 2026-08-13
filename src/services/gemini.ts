@@ -5,7 +5,7 @@
  * Используется официальный SDK @google/genai (пришёл на смену устаревшему
  * @google/generative-ai).
  */
-import { GoogleGenAI, ThinkingLevel, type ThinkingConfig } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, type Part, type ThinkingConfig } from '@google/genai';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { withTimeout } from '../utils.js';
@@ -107,7 +107,21 @@ export class GeminiProvider implements TextProvider {
 
   async generateText(prompt: string, options: TextGenerationOptions = {}): Promise<string> {
     if (!this.isConfigured) {
-      throw new ProviderRequestError(this.id, this.setupHint);
+      throw new ProviderRequestError(this.id, this.setupHint, { kind: 'auth' });
+    }
+
+    // Текст запроса и приложенные файлы едут одним сообщением: сначала текст,
+    // потом вложения. Файлы передаются прямо в теле запроса (inlineData),
+    // это допустимо, пока весь запрос укладывается в 20 МБ, — а больше
+    // Telegram боту и не отдаст.
+    const userParts: Part[] = [{ text: prompt }];
+    for (const attachment of options.attachments ?? []) {
+      userParts.push({
+        inlineData: {
+          mimeType: attachment.mimeType,
+          data: attachment.data.toString('base64'),
+        },
+      });
     }
 
     // Gemini ждёт историю в формате [{ role, parts: [{ text }] }],
@@ -117,16 +131,19 @@ export class GeminiProvider implements TextProvider {
         role: message.role === 'user' ? 'user' : 'model',
         parts: [{ text: message.text }],
       })),
-      { role: 'user', parts: [{ text: prompt }] },
+      { role: 'user', parts: userParts },
     ];
 
+    // Модель приходит извне: её задаёт либо настройка топика, либо перебор
+    // цепочки при отказе. Своя модель из .env — только значение по умолчанию.
+    const model = options.model ?? config.gemini.model;
     const startedAt = Date.now();
     const thinkingConfig = buildThinkingConfig();
 
     try {
       const response = await withTimeout(
         this.getClient().models.generateContent({
-          model: config.gemini.model,
+          model,
           contents,
           config: {
             systemInstruction: options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT,
@@ -137,7 +154,7 @@ export class GeminiProvider implements TextProvider {
           },
         }),
         config.ai.timeoutMs,
-        'Gemini',
+        `Gemini (${model})`,
       );
 
       const text = response.text?.trim();
@@ -156,6 +173,7 @@ export class GeminiProvider implements TextProvider {
             `Ответ не поместился в лимит токенов${spent ? ` (${spent} из них модель потратила на размышления)` : ''}. ` +
               `Возьмите модель без размышлений (например, gemini-flash-lite-latest) ` +
               'или задайте GEMINI_THINKING=minimal / GEMINI_THINKING=0 под ваше поколение модели.',
+            { kind: 'bad-request' },
           );
         }
 
@@ -165,13 +183,15 @@ export class GeminiProvider implements TextProvider {
           blockReason || finishReason
             ? `Модель отказалась отвечать (причина: ${blockReason ?? finishReason}).`
             : 'Модель вернула пустой ответ. Попробуйте переформулировать запрос.',
+          { kind: 'blocked' },
         );
       }
 
       logger.debug('Gemini: ответ получен', {
-        model: config.gemini.model,
+        model,
         ms: Date.now() - startedAt,
         chars: text.length,
+        attachments: options.attachments?.length ?? 0,
       });
 
       return text;
@@ -181,7 +201,18 @@ export class GeminiProvider implements TextProvider {
       const raw = error instanceof Error ? error.message : String(error);
       const { text, code, status } = extractApiError(raw);
 
-      logger.warn('Gemini вернул ошибку', { model: config.gemini.model, code, status, text });
+      logger.warn('Gemini вернул ошибку', { model, code, status, text });
+
+      // Таймаут ставит withTimeout, и это не ответ Google. Перебирать из-за
+      // него цепочку нельзя: четыре модели подряд по полторы минуты — это
+      // шесть минут молчания вместо ответа.
+      if (/превышен таймаут/i.test(raw)) {
+        throw new ProviderRequestError(
+          this.id,
+          `Модель «${model}» не ответила за отведённое время. Попробуйте ещё раз или упростите запрос.`,
+          { cause: error, kind: 'timeout' },
+        );
+      }
 
       // Географическая блокировка. Google отклоняет запрос по IP отправителя,
       // а не по ключу: диапазоны многих хостингов у него в чёрном списке.
@@ -196,7 +227,7 @@ export class GeminiProvider implements TextProvider {
             '• поднять прокси в разрешённом регионе и указать его в GEMINI_BASE_URL;\n' +
             '• переключиться на OpenAI-совместимый провайдер (OPENAI_BASE_URL, например OpenRouter) и команду /ask;\n' +
             '• перенести бота на хостинг с другим диапазоном адресов.',
-          { cause: error },
+          { cause: error, kind: 'geo' },
         );
       }
 
@@ -205,23 +236,37 @@ export class GeminiProvider implements TextProvider {
         throw new ProviderRequestError(
           this.id,
           `Gemini отклонил запрос (400): ${text}\n\n` +
-            `Модель: ${config.gemini.model}. Проверьте GEMINI_MODEL и GEMINI_THINKING в .env — ` +
+            `Модель: ${model}. Проверьте GEMINI_MODEL и GEMINI_THINKING в .env — ` +
             'у Gemini 2.5 и Gemini 3.x разные форматы параметра «размышлений».',
-          { cause: error },
+          { cause: error, kind: 'bad-request' },
         );
       }
       if (code === 404 || status === 'NOT_FOUND') {
         throw new ProviderRequestError(
           this.id,
-          `Модель «${config.gemini.model}» недоступна для вашего ключа. Проверьте GEMINI_MODEL в .env.`,
-          { cause: error },
+          `Модель «${model}» недоступна для вашего ключа. Проверьте её имя в GEMINI_CHAIN_MAIN / GEMINI_CHAIN_THINK.`,
+          { cause: error, kind: 'not-found' },
         );
       }
       if (code === 401 || code === 403 || /api[_ ]?key|API_KEY_INVALID/i.test(raw)) {
-        throw new ProviderRequestError(this.id, 'Gemini отклонил ключ. Проверьте GEMINI_API_KEY.', { cause: error });
+        throw new ProviderRequestError(this.id, 'Gemini отклонил ключ. Проверьте GEMINI_API_KEY.', {
+          cause: error,
+          kind: 'auth',
+        });
       }
       if (code === 429 || /quota|RESOURCE_EXHAUSTED/i.test(raw)) {
-        throw new ProviderRequestError(this.id, 'Превышена квота Gemini. Попробуйте позже.', { cause: error });
+        throw new ProviderRequestError(this.id, `У модели «${model}» закончилась дневная норма запросов.`, {
+          cause: error,
+          kind: 'quota',
+        });
+      }
+      // 5xx — беда на стороне Google, причём обычно у конкретной модели:
+      // соседняя в цепочке в этот же момент вполне может отвечать.
+      if (code !== undefined && code >= 500) {
+        throw new ProviderRequestError(this.id, `Google ответил ошибкой ${code}: ${text}`, {
+          cause: error,
+          kind: 'server',
+        });
       }
       throw new ProviderRequestError(this.id, `Ошибка Gemini: ${text}`, { cause: error });
     }

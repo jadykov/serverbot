@@ -6,6 +6,7 @@
  * «ловушка» для обычных сообщений (она внутри registerAiCommands).
  */
 import { Bot, GrammyError, HttpError, session } from 'grammy';
+import { FileAdapter } from '@grammyjs/storage-file';
 import { config } from './config.js';
 import { describeError, logger } from './logger.js';
 import { requestLogger } from './middlewares/logging.js';
@@ -13,6 +14,8 @@ import { replyToSender } from './middlewares/reply.js';
 import { rateLimit } from './middlewares/rateLimit.js';
 import { registerBasicCommands } from './commands/basic.js';
 import { registerAiCommands } from './commands/ai.js';
+import { registerModeCommands } from './commands/mode.js';
+import { MAIN_CHAIN } from './models.js';
 import { DEFAULT_IMAGE_PROVIDER_ID, DEFAULT_TEXT_PROVIDER_ID } from './services/registry.js';
 import type { BotContext, SessionData } from './types.js';
 
@@ -23,9 +26,12 @@ export const BOT_COMMANDS = [
   // Кириллическую /гем в это меню добавить нельзя: Telegram принимает
   // в именах команд только латиницу (иначе BOT_COMMAND_INVALID).
   { command: 'gem', description: 'Запрос к Gemini (то же самое, что /гем)' },
+  { command: 'think', description: 'Сложный вопрос сильной моделью (то же, что /подумай)' },
   { command: 'ask', description: 'Вопрос выбранной текстовой нейросети' },
   { command: 'draw', description: 'Нарисовать картинку по описанию' },
   { command: 'ai', description: 'Выбрать активную нейросеть' },
+  // Кириллическую /режим в меню тоже добавить нельзя — только латиницу.
+  { command: 'mode', description: 'Режим раздела: цепочка моделей и промпт (то же, что /режим)' },
   { command: 'reset', description: 'Очистить историю диалога' },
   { command: 'ping', description: 'Проверить связь и задержку' },
   { command: 'marco', description: 'Тест: бот ответит Polo!' },
@@ -45,21 +51,28 @@ export function createBot(): Bot<BotContext> {
   // 2. Ответы реплаем и в нужный топик форума.
   bot.use(replyToSender);
 
-  // 3. Сессия. По умолчанию хранится в памяти процесса: при рестарте
-  //    контекст диалогов теряется, а несколько реплик бота не увидят
-  //    сессии друг друга. Для продакшена подключите внешнее хранилище:
-  //    npm i @grammyjs/storage-redis
-  //    session({ initial, storage: new RedisAdapter({ instance: redis }) })
+  // 3. Сессия. Лежит в файлах на диске, а не в памяти процесса: кроме истории
+  //    диалога здесь настройки каждого топика (цепочка моделей, свой промпт).
+  //    Держи мы их в памяти, любой деплой молча сбрасывал бы настройки всех
+  //    разделов к умолчаниям — ошибки нет, бот работает, просто отвечает хуже.
+  //
+  //    Каталог задаётся SESSION_DIR и в Docker обязан лежать на томе.
+  //    Если однажды понадобится несколько реплик бота — заменить адаптер
+  //    на общий (@grammyjs/storage-redis), остальной код не изменится.
   bot.use(
     session({
       initial: (): SessionData => ({
         textProviderId: DEFAULT_TEXT_PROVIDER_ID,
         imageProviderId: DEFAULT_IMAGE_PROVIDER_ID,
         history: [],
+        chainId: MAIN_CHAIN,
+        systemPrompt: '',
       }),
+      storage: new FileAdapter<SessionData>({ dirName: config.session.dir }),
       // Ключ сессии по умолчанию — id чата. Для форумов добавляем id топика:
-      // так в каждом топике будет собственная история диалога и они
-      // не перемешиваются между собой.
+      // так в каждом топике будет собственная история диалога и свои настройки,
+      // и они не перемешиваются между собой. Ключ становится именем файла,
+      // поэтому разделитель — подчёркивание, а не двоеточие.
       getSessionKey: (ctx) => {
         const chatId = ctx.chat?.id;
         if (chatId === undefined) return undefined;
@@ -68,7 +81,7 @@ export function createBot(): Bot<BotContext> {
         const isTopic = message && 'is_topic_message' in message && message.is_topic_message;
         const threadId = isTopic ? message.message_thread_id : undefined;
 
-        return threadId === undefined ? String(chatId) : `${chatId}:${threadId}`;
+        return threadId === undefined ? String(chatId) : `${chatId}_${threadId}`;
       },
     }),
   );
@@ -76,8 +89,10 @@ export function createBot(): Bot<BotContext> {
   // 4. Защита от спама.
   bot.use(rateLimit);
 
-  // 5. Команды.
+  // 5. Команды. registerAiCommands — последней: внутри неё висит «ловушка»
+  //    для обычных сообщений, и она должна получать управление после всех.
   registerBasicCommands(bot);
+  registerModeCommands(bot);
   registerAiCommands(bot);
 
   // 6. Глобальная ловушка ошибок: без неё любое исключение

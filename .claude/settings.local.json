@@ -42,7 +42,14 @@
       "Bash(timeout 120 git push)",
       "Bash(timeout 90 docker pull ghcr.io/jadykov/serverbot:latest)",
       "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('страна:', d.get\\('country'\\), '| провайдер:', d.get\\('org'\\)\\)\")",
-      "WebSearch"
+      "WebSearch",
+      "Bash(grep -n '^#\\\\{1,3\\\\} ' README.md)",
+      "Bash(timeout 60 gh run list --limit 5)",
+      "WebFetch(domain:ai.google.dev)",
+      "WebFetch(domain:openrouter.ai)",
+      "Artifact",
+      "Bash(git rm *)",
+      "Bash(SESSION_DIR=/tmp/claude-1000/-home-claude-cli-serverbot/d88d1299-0fdc-4727-a9ae-43225262b406/scratchpad/s2 node -e ' *)"
     ]
   }
 }

@@ -44,6 +44,17 @@ function envBool(name: string, fallback: boolean): boolean {
   return ['true', '1', 'yes', 'on', 'da'].includes(raw);
 }
 
+/** Читает список строк через запятую: "a, b ,c" -> ["a", "b", "c"]. */
+function envStringList(name: string, fallback: string[]): string[] {
+  const raw = env(name);
+  if (!raw) return fallback;
+  const items = raw
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  return items.length > 0 ? items : fallback;
+}
+
 /** Читает список числовых id через запятую: "123,456" -> [123, 456]. */
 function envIdList(name: string): number[] {
   const raw = env(name);
@@ -105,7 +116,20 @@ export const config = {
     /** Общий таймаут запроса к любой нейросети. */
     timeoutMs: envInt('AI_TIMEOUT_MS', 90_000),
     /** Сколько сообщений диалога держать в контексте (0 — без истории). */
-    historyLimit: envInt('HISTORY_LIMIT', 10),
+    historyLimit: envInt('HISTORY_LIMIT', 30),
+  },
+
+  /**
+   * Где хранить сессии. Раньше они жили только в памяти процесса, и это было
+   * терпимо, пока в них лежала одна история переписки. Теперь там же настройки
+   * каждого топика — их потеря при рестарте прошла бы незаметно и молча
+   * ухудшила ответы, поэтому сессии уехали на диск.
+   *
+   * В Docker каталог обязан быть на томе, иначе пересоздание контейнера
+   * приводит ровно к той же потере, от которой мы уходили.
+   */
+  session: {
+    dir: envString('SESSION_DIR', 'data/sessions'),
   },
 
   gemini: {
@@ -126,6 +150,31 @@ export const config = {
      * supported»): запросы направляются через прокси в разрешённом регионе.
      */
     baseUrl: (env('GEMINI_BASE_URL') ?? '').replace(/\/+$/, ''),
+    /**
+     * Цепочки моделей: первая отвечает, остальные подхватывают, если она
+     * отказала (кончилась дневная квота, модель выведена из обращения).
+     *
+     * Имена вынесены в переменные окружения не случайно: Google регулярно
+     * переименовывает модели и закрывает старые версии, а точный список,
+     * доступный именно вашему ключу, виден только в AI Studio. Значения ниже —
+     * разумное умолчание, а не гарантия; если приходит 404, поправьте .env,
+     * пересобирать образ не нужно.
+     */
+    chains: {
+      /** Всё основное: болтовня, команды, картинки на вход, документы. */
+      main: envStringList('GEMINI_CHAIN_MAIN', [
+        'gemini-3.5-flash-lite',
+        'gemini-3.1-flash-lite',
+        'gemma-4-31b-it',
+        'gemma-4-26b-a4b-it',
+      ]),
+      /** «Хорошо подумай»: дневная квота маленькая, тратится осознанно. */
+      think: envStringList('GEMINI_CHAIN_THINK', [
+        'gemini-3.7-flash',
+        'gemini-3.6-flash',
+        'gemini-3.5-flash',
+      ]),
+    },
   },
 
   openai: {
@@ -134,12 +183,25 @@ export const config = {
     model: envString('OPENAI_MODEL', 'gpt-4o-mini'),
   },
 
-  fusionbrain: {
-    apiKey: env('FUSIONBRAIN_API_KEY') ?? '',
-    secretKey: env('FUSIONBRAIN_SECRET_KEY') ?? '',
-    baseUrl: envString('FUSIONBRAIN_BASE_URL', 'https://api-key.fusionbrain.ai').replace(/\/+$/, ''),
-    width: envInt('FUSIONBRAIN_WIDTH', 1024),
-    height: envInt('FUSIONBRAIN_HEIGHT', 1024),
+  /**
+   * OpenRouter — единственный платный канал бота. Через него идёт то, чего
+   * на бесплатном тарифе Gemini не существует в принципе: генерация картинок
+   * (у Google все image-модели помечены «Not available» для Free Tier).
+   *
+   * Ключ отдельный от OPENAI_API_KEY специально: тот может указывать на любой
+   * OpenAI-совместимый сервис, а здесь нужен именно OpenRouter с его
+   * эндпоинтом /images.
+   */
+  openrouter: {
+    apiKey: env('OPENROUTER_API_KEY') ?? '',
+    baseUrl: envString('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1').replace(/\/+$/, ''),
+    image: {
+      model: envString('OPENROUTER_IMAGE_MODEL', 'openai/gpt-image-1-mini'),
+      resolution: envString('OPENROUTER_IMAGE_RESOLUTION', '1024x1024'),
+      /** low обходится примерно в полцента за картинку — для чата этого хватает. */
+      quality: envString('OPENROUTER_IMAGE_QUALITY', 'low'),
+      format: envString('OPENROUTER_IMAGE_FORMAT', 'png'),
+    },
   },
 } as const;
 
