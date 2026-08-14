@@ -64,16 +64,18 @@ export class OpenRouterImageProvider implements ImageProvider {
         ? pickAspectRatio(options.width, options.height)
         : config.openrouter.image.aspectRatio;
 
-    // resolution уходит, только если его задали явно: основная модель его
-    // игнорирует, а лишнее поле в запросе — повод для 400 у соседних.
+    // Обязательны только модель, промпт и пропорция — их понимают все модели.
+    // Остальное уходит, только если задано явно: наборы параметров у моделей
+    // не совпадают (Krea не знает quality и output_format, OpenAI не знает
+    // ступеней разрешения), а лишнее поле в запросе — повод для 400.
     const body: Record<string, unknown> = {
       model,
       prompt,
-      quality,
       aspect_ratio: aspectRatio,
-      output_format: format,
     };
     if (resolution) body.resolution = resolution;
+    if (quality) body.quality = quality;
+    if (format) body.output_format = format;
 
     const startedAt = Date.now();
 
@@ -140,7 +142,9 @@ export class OpenRouterImageProvider implements ImageProvider {
 
     return {
       data: Buffer.from(image.b64_json, 'base64'),
-      mimeType: image.media_type ?? `image/${format}`,
+      // Тип берём из ответа; запасной вариант — заказанный формат, а если
+      // и его не задавали, то png: именно его отдают модели без output_format.
+      mimeType: image.media_type ?? (format ? `image/${format}` : 'image/png'),
       elapsedMs,
       costUsd,
     };
