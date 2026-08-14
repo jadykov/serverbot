@@ -204,12 +204,18 @@ export const config = {
         'gemini-3.1-flash-lite',
         'gemma-4-26b-a4b-it',
         'gemini-3-flash-preview',
+        // Прошлое поколение в самом хвосте: по 20 запросов в день у каждой —
+        // не рабочая лошадь, а страховка на случай, когда выдохлись все
+        // предыдущие. Дописаны в обе цепочки: терять их незачем, они бесплатны.
+        'gemini-2.5-flash-lite',
+        'gemini-2.5-flash',
       ]),
       /** Запросы «/гем контекст ...»: дневная квота маленькая, тратится осознанно. */
       think: envStringList('GEMINI_CHAIN_THINK', [
         'gemini-3.7-flash',
         'gemini-3.6-flash',
         'gemini-3.5-flash',
+        'gemini-2.5-flash',
       ]),
       /**
        * Подготовка запроса к рисованию: наводящие вопросы и сборка промпта.
@@ -223,6 +229,7 @@ export const config = {
       draw: envStringList('GEMINI_CHAIN_DRAW', [
         'gemini-3.5-flash-lite',
         'gemini-3.1-flash-lite',
+        'gemini-2.5-flash-lite',
         'gemma-4-31b-it',
       ]),
     },
