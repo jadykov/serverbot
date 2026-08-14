@@ -19,7 +19,8 @@
     "@grammyjs/runner": "^2.0.3",
     "@grammyjs/storage-file": "^2.6.0",
     "dotenv": "^16.4.7",
-    "grammy": "^1.39.1"
+    "grammy": "^1.39.1",
+    "jpeg-js": "^0.4.4"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",

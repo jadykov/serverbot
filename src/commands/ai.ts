@@ -33,6 +33,7 @@ import { generateWithChain } from '../services/chain.js';
 import { startDraw } from './draw.js';
 import { synthesizeSpeech } from '../services/gemini-tts.js';
 import { rememberMessage, searchMessages } from '../services/search-index.js';
+import { BOX_COLORS, drawBoxes, findObjects } from '../services/pointing.js';
 import { resolveChain, THINK_CHAIN } from '../models.js';
 import {
   ProviderNotConfiguredError,
@@ -472,6 +473,41 @@ function resolveImageRequest(ctx: BotContext, caption: string): { prompt: string
   return { prompt: asked || DEFAULT_IMAGE_PROMPT };
 }
 
+/**
+ * Подпись к фотографии вида «/гем где здесь клапан» — просьба показать,
+ * а не рассказать. Уводит снимок в отдельную ветку с рамками.
+ */
+const WHERE_PREFIX = /^(?:где|where)(?:\s+(?:здесь|тут|на\s+фото|на\s+картинке))?[\s,:.—–-]+([\s\S]*)$/i;
+
+/**
+ * «Где здесь ...»: находит предметы на фотографии и обводит их рамками.
+ *
+ * Отдельно от обычного разбора картинки, потому что задача другая. Обычная
+ * модель расскажет, что на снимке; эта — покажет, где именно, вернув
+ * координаты (см. src/services/pointing.ts).
+ */
+async function handlePointing(ctx: BotContext, image: Attachment, query: string): Promise<void> {
+  try {
+    const found = await withChatAction(ctx, 'upload_photo', () => findObjects(image, query));
+
+    if (found.length === 0) {
+      await ctx.reply(`🔍 Не нашёл на фотографии: ${escapeHtml(query)}`, { parse_mode: 'HTML' });
+      return;
+    }
+
+    const marked = drawBoxes(image.data, found);
+    const legend = found
+      .map((object, index) => `${BOX_COLORS[index % BOX_COLORS.length]!.name} — ${object.label}`)
+      .join('\n');
+
+    await ctx.replyWithPhoto(new InputFile(marked, 'found.jpg'), {
+      caption: `🔍 ${query}\n\n${legend}`,
+    });
+  } catch (error) {
+    await replyWithError(ctx, error);
+  }
+}
+
 /** Скачивает картинки и отправляет их в модель вместе с вопросом. */
 async function handlePhotos(ctx: BotContext, fileIds: string[], caption: string): Promise<void> {
   const request = resolveImageRequest(ctx, caption);
@@ -487,6 +523,16 @@ async function handlePhotos(ctx: BotContext, fileIds: string[], caption: string)
     const attachments = await withChatAction(ctx, 'typing', () =>
       Promise.all(fileIds.map((fileId) => downloadAttachment(ctx, fileId))),
     );
+
+    // «где здесь ...» — просьба показать, а не рассказать. Рамки рисуются
+    // по первому снимку: обводить каждый кадр альбома человек не просил.
+    const where = WHERE_PREFIX.exec(request.prompt.trim());
+    const first = attachments[0];
+    if (where && first && first.mimeType === 'image/jpeg') {
+      await handlePointing(ctx, first, (where[1] ?? '').trim());
+      return;
+    }
+
     await askChain(ctx, gemini, resolveChain(ctx.session.chainId).models, request.prompt, attachments);
   } catch (error) {
     await replyWithError(ctx, error);
