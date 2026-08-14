@@ -15,7 +15,7 @@
  */
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { config, isAdmin } from '../config.js';
+import { config } from '../config.js';
 import { logger } from '../logger.js';
 
 /** Сколько картинок пользователь уже потратил и в какой день. */
@@ -126,9 +126,11 @@ export type QuotaDecision =
 export async function reserveImageSlot(userId: number | undefined): Promise<QuotaDecision> {
   const limit = config.imageQuota.perUserPerDay;
 
-  // 0 или меньше — лимит выключен. Админов не ограничиваем, как и в рейт-лимите:
-  // счёт за картинки приходит им же.
-  if (limit <= 0 || userId === undefined || isAdmin(userId)) {
+  // 0 или меньше — лимит выключен. Админы, в отличие от рейт-лимита, норме
+  // подчиняются наравне со всеми: рейт-лимит защищает бота от спама, а норма
+  // делит общий кошелёк, и исключений в ней быть не должно — иначе это уже
+  // не общая норма, а привилегия.
+  if (limit <= 0 || userId === undefined) {
     return { allowed: true, used: 0, limit: 0, remaining: Number.POSITIVE_INFINITY };
   }
 
@@ -155,7 +157,7 @@ export async function reserveImageSlot(userId: number | undefined): Promise<Quot
  */
 export async function peekImageQuota(userId: number | undefined): Promise<{ used: number; limit: number } | null> {
   const limit = config.imageQuota.perUserPerDay;
-  if (limit <= 0 || userId === undefined || isAdmin(userId)) return null;
+  if (limit <= 0 || userId === undefined) return null;
 
   await load();
   const record = records.get(userId);
