@@ -14,6 +14,7 @@ import { replyToSender } from './middlewares/reply.js';
 import { rateLimit } from './middlewares/rateLimit.js';
 import { registerBasicCommands } from './commands/basic.js';
 import { registerAiCommands } from './commands/ai.js';
+import { registerDrawCommands } from './commands/draw.js';
 import { registerModeCommands } from './commands/mode.js';
 import { MAIN_CHAIN } from './models.js';
 import { DEFAULT_IMAGE_PROVIDER_ID, DEFAULT_TEXT_PROVIDER_ID } from './services/registry.js';
@@ -87,8 +88,11 @@ export function createBot(): Bot<BotContext> {
 
   // 5. Команды. registerAiCommands — последней: внутри неё висит «ловушка»
   //    для обычных сообщений, и она должна получать управление после всех.
+  //    registerDrawCommands стоит перед ней по той же причине: правка промпта
+  //    приходит обычным сообщением, и перехватить его надо раньше ловушки.
   registerBasicCommands(bot);
   registerModeCommands(bot);
+  registerDrawCommands(bot);
   registerAiCommands(bot);
 
   // 6. Глобальная ловушка ошибок: без неё любое исключение

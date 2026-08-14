@@ -130,6 +130,21 @@ export const config = {
     timezone: envString('IMAGE_DAILY_LIMIT_TZ', 'Europe/Moscow'),
   },
 
+  /**
+   * Разговор перед рисованием: бот уточняет замысел и только потом тратит
+   * деньги. Уточнения ведёт бесплатная Gemma, поэтому диалог не стоит ничего,
+   * а картинка получается с первого раза — при двух попытках в день это
+   * важнее, чем сэкономленные пять секунд.
+   */
+  draw: {
+    /** Выключатель: false — старое поведение, рисуем сразу по команде. */
+    askQuestions: envBool('DRAW_ASK_QUESTIONS', true),
+    /** Сколько вопросов задавать максимум. Больше трёх — уже допрос. */
+    maxQuestions: envInt('DRAW_MAX_QUESTIONS', 3),
+    /** Через сколько минут брошенный черновик выбрасывается. */
+    draftTtlMin: envInt('DRAW_DRAFT_TTL_MIN', 30),
+  },
+
   ai: {
     /** Общий таймаут запроса к любой нейросети. */
     timeoutMs: envInt('AI_TIMEOUT_MS', 90_000),
@@ -196,6 +211,20 @@ export const config = {
         'gemini-3.6-flash',
         'gemini-3.5-flash',
       ]),
+      /**
+       * Подготовка запроса к рисованию: наводящие вопросы и сборка промпта.
+       *
+       * Цепочка своя и намеренно лёгкая. Задача короткая и полностью
+       * формальная — вернуть JSON с тремя вопросами, — а человек в это время
+       * ждёт. Замерено на одном и том же запросе: Gemma 31B думает 25 секунд,
+       * flash-lite — полторы, и качество вопросов неотличимо. Gemma осталась
+       * в хвосте цепочки на случай, если у lite кончится дневная норма.
+       */
+      draw: envStringList('GEMINI_CHAIN_DRAW', [
+        'gemini-3.5-flash-lite',
+        'gemini-3.1-flash-lite',
+        'gemma-4-31b-it',
+      ]),
     },
   },
 
@@ -248,6 +277,25 @@ export const config = {
        */
       quality: envString('OPENROUTER_IMAGE_QUALITY', ''),
       format: envString('OPENROUTER_IMAGE_FORMAT', ''),
+      /**
+       * Слаг провайдера в OpenRouter — адрес, по которому доставляются
+       * параметры, которых нет в общем словаре (у Krea это creativity
+       * и слайдеры). Виден в /api/v1/images/models/<модель>/endpoints,
+       * поле provider_slug. Пусто — такие параметры не отправляются вовсе.
+       */
+      providerSlug: envString('OPENROUTER_IMAGE_PROVIDER_SLUG', 'krea'),
+      /**
+       * Насколько модели позволено дописывать промпт за автора:
+       * raw | low | medium | high. Пусто — не отправляем, у Krea включится
+       * её собственное умолчание medium.
+       *
+       * Значения два, потому что случая тоже два. Промпт, собранный
+       * в диалоге, менять уже незачем — для него raw. А запрос «рисуй как
+       * есть», где человек написал два слова, наоборот, живёт за счёт
+       * дорисовки моделью — для него medium.
+       */
+      creativityRefined: envString('KREA_CREATIVITY_REFINED', 'raw'),
+      creativityRaw: envString('KREA_CREATIVITY_PLAIN', 'medium'),
     },
   },
 } as const;

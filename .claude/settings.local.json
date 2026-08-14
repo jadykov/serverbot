@@ -56,7 +56,16 @@
       "Bash(pkill -9 -f \"serverbot/src/index.ts\")",
       "Bash(python3 *)",
       "Bash(/ai)",
-      "Bash(grep -rn \"/ask\\\\|`/ai`\\\\|мышление\" README.md src/ .env.example)"
+      "Bash(grep -rn \"/ask\\\\|`/ai`\\\\|мышление\" README.md src/ .env.example)",
+      "Bash(curl -s https://openrouter.ai/api/v1/models)",
+      "Bash(curl -s -o /tmp/claude-1000/-home-claude-cli-serverbot/61541cd9-7f1d-4d74-a5fc-66a4abb879a7/scratchpad/models.json -w \"%{http_code} %{size_download}\\\\n\" https://openrouter.ai/api/v1/models)",
+      "Bash(curl -s https://openrouter.ai/api/v1/images/models -o imgmodels.json)",
+      "Bash(curl -s https://openrouter.ai/api/v1/images/models/krea/krea-2-medium-turbo/endpoints)",
+      "Bash(npx tsc *)",
+      "WebFetch(domain:www.krea.ai)",
+      "WebFetch(domain:fal.ai)",
+      "WebFetch(domain:docs.krea.ai)",
+      "Bash(git commit *)"
     ]
   }
 }

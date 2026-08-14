@@ -58,7 +58,7 @@ export class OpenRouterImageProvider implements ImageProvider {
       throw new ProviderRequestError(this.id, this.setupHint, { kind: 'auth' });
     }
 
-    const { model, quality, format, resolution } = config.openrouter.image;
+    const { model, quality, format, resolution, providerSlug } = config.openrouter.image;
     const aspectRatio =
       options.width && options.height
         ? pickAspectRatio(options.width, options.height)
@@ -76,6 +76,19 @@ export class OpenRouterImageProvider implements ImageProvider {
     if (resolution) body.resolution = resolution;
     if (quality) body.quality = quality;
     if (format) body.output_format = format;
+    if (options.seed !== undefined) body.seed = options.seed;
+
+    /**
+     * Параметры, которых нет в общем словаре OpenRouter, передаются адресно —
+     * в provider.options под слагом провайдера. Замерено на живом ключе:
+     * то же поле, положенное верхним уровнем, молча выбрасывается, и запрос
+     * уходит без него (мы за такую картинку заплатили). Через provider.options
+     * оно доходит до Krea — на неверное значение приходит её собственный 422
+     * со списком допустимых.
+     */
+    if (options.creativity && providerSlug) {
+      body.provider = { options: { [providerSlug]: { creativity: options.creativity } } };
+    }
 
     const startedAt = Date.now();
 
@@ -138,7 +151,13 @@ export class OpenRouterImageProvider implements ImageProvider {
     const elapsedMs = Date.now() - startedAt;
     const costUsd = data.usage?.cost;
 
-    logger.info('Картинка сгенерирована', { model, aspectRatio, quality, ms: elapsedMs, costUsd });
+    logger.info('Картинка сгенерирована', {
+      model,
+      aspectRatio,
+      creativity: options.creativity,
+      ms: elapsedMs,
+      costUsd,
+    });
 
     return {
       data: Buffer.from(image.b64_json, 'base64'),
