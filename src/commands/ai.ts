@@ -46,8 +46,19 @@ const GEMINI_ID = 'gemini';
  */
 const CYRILLIC_GEM = /^\/гем(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/i;
 
-/** Кириллическая форма команды «хорошо подумай»: /подумай, /подумай@имя_бота. */
-const CYRILLIC_THINK = /^\/подумай(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/i;
+/**
+ * Слово-переключатель в начале запроса: «/гем мышление ...», «/gem think ...».
+ *
+ * Отдельной командой это не сделано намеренно. Точка входа к нейросети одна,
+ * её и надо помнить; а меню Telegram не засоряется ещё одним пунктом, который
+ * от соседнего отличается только выбором цепочки.
+ *
+ * Разделитель после слова прописан явно, а не через \b: в JavaScript граница
+ * слова определяется по латинице, и с кириллицей \b просто не срабатывает —
+ * «мышление что-то» не совпало бы вообще. Заодно такая запись не ловит
+ * «мышления» и «thinking», где слово лишь начинается похоже.
+ */
+const THINK_PREFIX = /^(?:мышление|think)(?:[\s,:.—–-]+([\s\S]*))?$/i;
 
 /**
  * Та же команда, но в подписи к фотографии: «/гем что здесь написано».
@@ -197,38 +208,35 @@ function extractPrompt(ctx: BotContext, args: string): string {
 }
 
 /**
- * Обработчик /гем и /gem — работает цепочкой, выбранной для этого раздела
- * командой /режим. По умолчанию это основная цепочка.
+ * Обработчик /гем и /gem.
+ *
+ * По умолчанию работает цепочкой, выбранной для раздела командой /режим.
+ * Если запрос начинается со слова «мышление» (или «think»), вместо неё берётся
+ * сильная цепочка — какой бы режим в разделе ни стоял. Дневная норма у этих
+ * моделей небольшая, поэтому переключение всегда явное.
  */
-async function handleGemini(ctx: BotContext, prompt: string): Promise<void> {
-  if (!prompt) {
+async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
+  if (!rawPrompt) {
     await ctx.reply(
       'Напишите запрос после команды. Например:\n' +
         '<code>/гем объясни рекурсию за три предложения</code>\n\n' +
+        'Для сложной задачи добавьте слово «мышление» — возьму модель посильнее:\n' +
+        '<code>/гем мышление почему этот SQL висит на большой таблице</code>\n\n' +
         'Ещё можно ответить командой <code>/гем</code> на любое сообщение — я возьму его текст.',
       { parse_mode: 'HTML' },
     );
     return;
   }
 
-  const gemini = await requireGemini(ctx);
-  if (!gemini) return;
+  const think = THINK_PREFIX.exec(rawPrompt.trim());
+  const prompt = think ? (think[1] ?? '').trim() : rawPrompt;
 
-  await askChain(ctx, gemini, resolveChain(ctx.session.chainId).models, prompt);
-}
-
-/**
- * Обработчик /подумай и /think — принудительно берёт «думающую» цепочку,
- * какой бы режим ни стоял в разделе. Дневная норма у этих моделей маленькая,
- * поэтому команда отдельная: тратить её нужно осознанно.
- */
-async function handleThink(ctx: BotContext, prompt: string): Promise<void> {
-  if (!prompt) {
+  if (think && !prompt) {
     await ctx.reply(
-      'Напишите задачу после команды. Например:\n' +
-        '<code>/подумай почему этот SQL висит на большой таблице</code>\n\n' +
-        'Эта команда берёт самые сильные модели, но их дневная норма невелика — ' +
-        'для обычных вопросов хватает <code>/гем</code>.',
+      'После «мышление» нужна сама задача. Например:\n' +
+        '<code>/гем мышление почему этот SQL висит на большой таблице</code>\n\n' +
+        'Эти модели сильнее, но их дневная норма невелика — для обычных вопросов ' +
+        'хватает просто <code>/гем</code>.',
       { parse_mode: 'HTML' },
     );
     return;
@@ -237,7 +245,8 @@ async function handleThink(ctx: BotContext, prompt: string): Promise<void> {
   const gemini = await requireGemini(ctx);
   if (!gemini) return;
 
-  await askChain(ctx, gemini, resolveChain(THINK_CHAIN).models, prompt);
+  const chain = think ? resolveChain(THINK_CHAIN) : resolveChain(ctx.session.chainId);
+  await askChain(ctx, gemini, chain.models, prompt);
 }
 
 /**
@@ -335,19 +344,6 @@ export function registerAiCommands(bot: Bot<BotContext>): void {
     if (addressee && addressee.toLowerCase() !== ctx.me.username.toLowerCase()) return;
 
     await handleGemini(ctx, extractPrompt(ctx, match?.[2] ?? ''));
-  });
-
-  // ------------------------------------------------- /think и /подумай
-  bot.command('think', async (ctx) => {
-    await handleThink(ctx, extractPrompt(ctx, ctx.match));
-  });
-
-  bot.hears(CYRILLIC_THINK, async (ctx) => {
-    const match = typeof ctx.match === 'string' ? null : ctx.match;
-    const addressee = match?.[1];
-    if (addressee && addressee.toLowerCase() !== ctx.me.username.toLowerCase()) return;
-
-    await handleThink(ctx, extractPrompt(ctx, match?.[2] ?? ''));
   });
 
   // ------------------------------------------------------------------ /ask

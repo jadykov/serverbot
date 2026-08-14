@@ -49,7 +49,11 @@
       "WebFetch(domain:openrouter.ai)",
       "Artifact",
       "Bash(git rm *)",
-      "Bash(SESSION_DIR=/tmp/claude-1000/-home-claude-cli-serverbot/d88d1299-0fdc-4727-a9ae-43225262b406/scratchpad/s2 node -e ' *)"
+      "Bash(SESSION_DIR=/tmp/claude-1000/-home-claude-cli-serverbot/d88d1299-0fdc-4727-a9ae-43225262b406/scratchpad/s2 node -e ' *)",
+      "Bash(break)",
+      "Bash(pkill -f \"tsx watch --clear-screen=false src/index.ts\")",
+      "Bash(pkill -9 -f \"src/index.ts\")",
+      "Bash(pkill -9 -f \"serverbot/src/index.ts\")"
     ]
   }
 }
