@@ -26,7 +26,7 @@ export const BOT_COMMANDS = [
   { command: 'help', description: 'Список всех команд' },
   // Кириллическую /гем в это меню добавить нельзя: Telegram принимает
   // в именах команд только латиницу (иначе BOT_COMMAND_INVALID).
-  { command: 'gem', description: 'Запрос к Gemini (то же, что /гем). Слова: context, draw' },
+  { command: 'gem', description: 'Запрос к Gemini (то же, что /гем). Слова: context, draw, say' },
   // Кириллическую /режим в меню тоже добавить нельзя — только латиницу.
   { command: 'mode', description: 'Режим раздела: цепочка моделей и промпт (то же, что /режим)' },
   { command: 'reset', description: 'Очистить историю диалога' },

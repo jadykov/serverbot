@@ -65,7 +65,9 @@
       "WebFetch(domain:www.krea.ai)",
       "WebFetch(domain:fal.ai)",
       "WebFetch(domain:docs.krea.ai)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(echo \"статус чистый: $?\")",
+      "Bash(file /tmp/claude-1000/-home-claude-cli-serverbot/61541cd9-7f1d-4d74-a5fc-66a4abb879a7/scratchpad/speech.*)"
     ]
   }
 }

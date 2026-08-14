@@ -22,7 +22,7 @@
  *     работает всегда, в группах — только если у бота отключён privacy mode
  *     (@BotFather → /setprivacy → Disable).
  */
-import { GrammyError, type Bot } from 'grammy';
+import { GrammyError, InputFile, type Bot } from 'grammy';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { findTextProvider } from '../services/registry.js';
@@ -31,6 +31,7 @@ import { withChatAction } from '../utils.js';
 import { collectAlbumPart, downloadAttachment, pickPhotoFileId } from '../media.js';
 import { generateWithChain } from '../services/chain.js';
 import { startDraw } from './draw.js';
+import { synthesizeSpeech } from '../services/gemini-tts.js';
 import { resolveChain, THINK_CHAIN } from '../models.js';
 import {
   ProviderNotConfiguredError,
@@ -69,6 +70,14 @@ const CONTEXT_PREFIX = /^(?:контекст|context)(?:[\s,:.—–-]+([\s\S]*)
  * «/gem draw ...» — вместо ответа текстом бот рисует картинку.
  */
 const DRAW_PREFIX = /^(?:нарисуй|draw)(?:[\s,:.—–-]+([\s\S]*))?$/i;
+
+/**
+ * Третье слово-переключатель: «/гем скажи ...» — ответ голосом.
+ *
+ * Без текста после слова озвучивается последняя реплика бота: чаще всего
+ * это и нужно — прочитал ответ, захотел послушать.
+ */
+const SPEAK_PREFIX = /^(?:скажи|say)(?:[\s,:.—–-]+([\s\S]*))?$/i;
 
 /**
  * Та же команда, но в подписи к фотографии: «/гем что здесь написано».
@@ -252,6 +261,12 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
     return;
   }
 
+  const speak = SPEAK_PREFIX.exec(rawPrompt.trim());
+  if (speak) {
+    await handleSpeak(ctx, (speak[1] ?? '').trim());
+    return;
+  }
+
   const think = CONTEXT_PREFIX.exec(rawPrompt.trim());
   const prompt = think ? (think[1] ?? '').trim() : rawPrompt;
 
@@ -271,6 +286,68 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
 
   const chain = think ? resolveChain(THINK_CHAIN) : resolveChain(ctx.session.chainId);
   await askChain(ctx, gemini, chain.models, prompt);
+}
+
+/**
+ * Обрезает текст до разумной длины по границе предложения.
+ *
+ * Резать на полуслове неприятно на слух: голос обрывается посреди фразы,
+ * и непонятно, кончилась мысль или сломался бот.
+ */
+function trimForSpeech(text: string, limit: number): { text: string; trimmed: boolean } {
+  if (text.length <= limit) return { text, trimmed: false };
+
+  const cut = text.slice(0, limit);
+  const lastStop = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '), cut.lastIndexOf('\n'));
+
+  return { text: lastStop > limit / 3 ? cut.slice(0, lastStop + 1) : cut, trimmed: true };
+}
+
+/**
+ * Озвучка: «/гем скажи ...».
+ *
+ * Без текста берётся последний ответ бота из истории раздела — обычно
+ * человек как раз его и хочет послушать, а переписывать его руками глупо.
+ */
+async function handleSpeak(ctx: BotContext, request: string): Promise<void> {
+  const lastAnswer = [...ctx.session.history].reverse().find((message) => message.role === 'assistant')?.text;
+  const source = request || lastAnswer || '';
+
+  if (!source) {
+    await ctx.reply(
+      'Напишите, что произнести:\n<code>/гем скажи привет, коллеги</code>\n\n' +
+        'Если текст не указывать, я озвучу свой последний ответ — но в этом разделе я ещё ничего не отвечал.',
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
+  // Разметка Markdown на слух превращается в мусор: «звёздочка жирный звёздочка».
+  const plain = source.replace(/[*_`#>]/g, '').replace(/\[([^\]]+)]\([^)]+\)/g, '$1');
+  const { text, trimmed } = trimForSpeech(plain.trim(), config.tts.maxChars);
+
+  try {
+    const speech = await withChatAction(ctx, 'record_voice', () => synthesizeSpeech(text));
+
+    const notes = [
+      speech.skipped.length > 0 ? 'озвучивала запасная модель' : '',
+      trimmed ? `прочитано ${text.length} знаков из ${plain.length}` : '',
+    ].filter(Boolean);
+    const caption = notes.length > 0 ? `🔊 ${notes.join(', ')}` : undefined;
+
+    // Настоящее голосовое Telegram принимает только в OGG/Opus. Без ffmpeg
+    // отдаём WAV обычным аудиофайлом — играется так же, выглядит иначе.
+    if (speech.isVoice) {
+      await ctx.replyWithVoice(new InputFile(speech.data, 'speech.ogg'), caption ? { caption } : {});
+    } else {
+      await ctx.replyWithAudio(new InputFile(speech.data, 'speech.wav'), {
+        title: 'Озвучка',
+        ...(caption ? { caption } : {}),
+      });
+    }
+  } catch (error) {
+    await replyWithError(ctx, error);
+  }
 }
 
 /**

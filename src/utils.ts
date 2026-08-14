@@ -48,7 +48,7 @@ export function formatDuration(ms: number): string {
  */
 export async function withChatAction<T>(
   ctx: BotContext,
-  action: 'typing' | 'upload_photo',
+  action: 'typing' | 'upload_photo' | 'record_voice' | 'upload_voice',
   task: () => Promise<T>,
 ): Promise<T> {
   const send = () => {

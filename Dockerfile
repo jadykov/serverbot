@@ -50,6 +50,12 @@ RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit
 # --------------------------------------------------------------- runtime
 FROM base AS runtime
 ENV NODE_ENV=production
+# ffmpeg нужен только для озвучки: Gemini отдаёт сырой PCM, а Telegram
+# принимает голосовые исключительно в OGG/Opus. Без ffmpeg бот работает
+# ровно так же, но отправляет озвучку обычным аудиофайлом (WAV) — играется
+# он не хуже, только весит вдесятеро больше и выглядит как вложение.
+# Если образ важнее голосовых кружочков, эту строку можно убрать.
+RUN apk add --no-cache ffmpeg
 # В образе node уже есть непривилегированный пользователь `node`.
 # Запускать контейнер от root — плохая привычка.
 COPY --chown=node:node package.json ./

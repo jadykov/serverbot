@@ -197,78 +197,89 @@ export class GeminiProvider implements TextProvider {
       return text;
     } catch (error) {
       if (error instanceof ProviderRequestError) throw error;
-
-      const raw = error instanceof Error ? error.message : String(error);
-      const { text, code, status } = extractApiError(raw);
-
-      logger.warn('Gemini вернул ошибку', { model, code, status, text });
-
-      // Таймаут ставит withTimeout, и это не ответ Google. Перебирать из-за
-      // него цепочку нельзя: четыре модели подряд по полторы минуты — это
-      // шесть минут молчания вместо ответа.
-      if (/превышен таймаут/i.test(raw)) {
-        throw new ProviderRequestError(
-          this.id,
-          `Модель «${model}» не ответила за отведённое время. Попробуйте ещё раз или упростите запрос.`,
-          { cause: error, kind: 'timeout' },
-        );
-      }
-
-      // Географическая блокировка. Google отклоняет запрос по IP отправителя,
-      // а не по ключу: диапазоны многих хостингов у него в чёрном списке.
-      // Ошибка приходит с кодом 400, но с настройками бота никак не связана.
-      if (/location is not supported/i.test(text)) {
-        throw new ProviderRequestError(
-          this.id,
-          'Google не обслуживает запросы с IP этого сервера («User location is not supported»).\n\n' +
-            'Дело не в ключе и не в .env — тот же ключ работает с машины в другой сети. ' +
-            'Google блокирует диапазоны многих хостингов целиком.\n\n' +
-            'Что можно сделать:\n' +
-            '• поднять прокси в разрешённом регионе и указать его в GEMINI_BASE_URL;\n' +
-            '• переключиться на OpenAI-совместимый провайдер (OPENAI_BASE_URL, например OpenRouter);\n' +
-            '• перенести бота на хостинг с другим диапазоном адресов.',
-          { cause: error, kind: 'geo' },
-        );
-      }
-
-      // 400: чаще всего в запрос попал параметр, которого модель не понимает.
-      if (code === 400 || status === 'INVALID_ARGUMENT') {
-        throw new ProviderRequestError(
-          this.id,
-          `Gemini отклонил запрос (400): ${text}\n\n` +
-            `Модель: ${model}. Проверьте GEMINI_MODEL и GEMINI_THINKING в .env — ` +
-            'у Gemini 2.5 и Gemini 3.x разные форматы параметра «размышлений».',
-          { cause: error, kind: 'bad-request' },
-        );
-      }
-      if (code === 404 || status === 'NOT_FOUND') {
-        throw new ProviderRequestError(
-          this.id,
-          `Модель «${model}» недоступна для вашего ключа. Проверьте её имя в GEMINI_CHAIN_MAIN / GEMINI_CHAIN_THINK.`,
-          { cause: error, kind: 'not-found' },
-        );
-      }
-      if (code === 401 || code === 403 || /api[_ ]?key|API_KEY_INVALID/i.test(raw)) {
-        throw new ProviderRequestError(this.id, 'Gemini отклонил ключ. Проверьте GEMINI_API_KEY.', {
-          cause: error,
-          kind: 'auth',
-        });
-      }
-      if (code === 429 || /quota|RESOURCE_EXHAUSTED/i.test(raw)) {
-        throw new ProviderRequestError(this.id, `У модели «${model}» закончилась дневная норма запросов.`, {
-          cause: error,
-          kind: 'quota',
-        });
-      }
-      // 5xx — беда на стороне Google, причём обычно у конкретной модели:
-      // соседняя в цепочке в этот же момент вполне может отвечать.
-      if (code !== undefined && code >= 500) {
-        throw new ProviderRequestError(this.id, `Google ответил ошибкой ${code}: ${text}`, {
-          cause: error,
-          kind: 'server',
-        });
-      }
-      throw new ProviderRequestError(this.id, `Ошибка Gemini: ${text}`, { cause: error });
+      throw translateGeminiError(this.id, model, error);
     }
   }
+}
+
+/**
+ * Переводит ошибку Google API в понятную боту и человеку.
+ *
+ * Вынесено из провайдера, потому что к Gemini ходит не только он: тем же
+ * ключом и с теми же отказами работает синтез речи (src/services/gemini-tts.ts).
+ * Главное здесь — вид отказа: от него зависит, имеет ли смысл перебирать
+ * цепочку моделей дальше (см. src/services/chain.ts).
+ */
+export function translateGeminiError(providerId: string, model: string, error: unknown): ProviderRequestError {
+  const raw = error instanceof Error ? error.message : String(error);
+  const { text, code, status } = extractApiError(raw);
+
+  logger.warn('Gemini вернул ошибку', { model, code, status, text });
+
+  // Таймаут ставит withTimeout, и это не ответ Google. Перебирать из-за
+  // него цепочку нельзя: четыре модели подряд по полторы минуты — это
+  // шесть минут молчания вместо ответа.
+  if (/превышен таймаут/i.test(raw)) {
+    return new ProviderRequestError(
+      providerId,
+      `Модель «${model}» не ответила за отведённое время. Попробуйте ещё раз или упростите запрос.`,
+      { cause: error, kind: 'timeout' },
+    );
+  }
+
+  // Географическая блокировка. Google отклоняет запрос по IP отправителя,
+  // а не по ключу: диапазоны многих хостингов у него в чёрном списке.
+  // Ошибка приходит с кодом 400, но с настройками бота никак не связана.
+  if (/location is not supported/i.test(text)) {
+    return new ProviderRequestError(
+      providerId,
+      'Google не обслуживает запросы с IP этого сервера («User location is not supported»).\n\n' +
+        'Дело не в ключе и не в .env — тот же ключ работает с машины в другой сети. ' +
+        'Google блокирует диапазоны многих хостингов целиком.\n\n' +
+        'Что можно сделать:\n' +
+        '• поднять прокси в разрешённом регионе и указать его в GEMINI_BASE_URL;\n' +
+        '• переключиться на OpenAI-совместимый провайдер (OPENAI_BASE_URL, например OpenRouter);\n' +
+        '• перенести бота на хостинг с другим диапазоном адресов.',
+      { cause: error, kind: 'geo' },
+    );
+  }
+
+  // 400: чаще всего в запрос попал параметр, которого модель не понимает.
+  if (code === 400 || status === 'INVALID_ARGUMENT') {
+    return new ProviderRequestError(
+      providerId,
+      `Gemini отклонил запрос (400): ${text}\n\n` +
+        `Модель: ${model}. Проверьте GEMINI_MODEL и GEMINI_THINKING в .env — ` +
+        'у Gemini 2.5 и Gemini 3.x разные форматы параметра «размышлений».',
+      { cause: error, kind: 'bad-request' },
+    );
+  }
+  if (code === 404 || status === 'NOT_FOUND') {
+    return new ProviderRequestError(
+      providerId,
+      `Модель «${model}» недоступна для вашего ключа. Проверьте её имя в GEMINI_CHAIN_MAIN / GEMINI_CHAIN_THINK.`,
+      { cause: error, kind: 'not-found' },
+    );
+  }
+  if (code === 401 || code === 403 || /api[_ ]?key|API_KEY_INVALID/i.test(raw)) {
+    return new ProviderRequestError(providerId, 'Gemini отклонил ключ. Проверьте GEMINI_API_KEY.', {
+      cause: error,
+      kind: 'auth',
+    });
+  }
+  if (code === 429 || /quota|RESOURCE_EXHAUSTED/i.test(raw)) {
+    return new ProviderRequestError(providerId, `У модели «${model}» закончилась дневная норма запросов.`, {
+      cause: error,
+      kind: 'quota',
+    });
+  }
+  // 5xx — беда на стороне Google, причём обычно у конкретной модели:
+  // соседняя в цепочке в этот же момент вполне может отвечать.
+  if (code !== undefined && code >= 500) {
+    return new ProviderRequestError(providerId, `Google ответил ошибкой ${code}: ${text}`, {
+      cause: error,
+      kind: 'server',
+    });
+  }
+  return new ProviderRequestError(providerId, `Ошибка Gemini: ${text}`, { cause: error });
 }
