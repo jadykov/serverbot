@@ -53,7 +53,10 @@
       "Bash(break)",
       "Bash(pkill -f \"tsx watch --clear-screen=false src/index.ts\")",
       "Bash(pkill -9 -f \"src/index.ts\")",
-      "Bash(pkill -9 -f \"serverbot/src/index.ts\")"
+      "Bash(pkill -9 -f \"serverbot/src/index.ts\")",
+      "Bash(python3 *)",
+      "Bash(/ai)",
+      "Bash(grep -rn \"/ask\\\\|`/ai`\\\\|мышление\" README.md src/ .env.example)"
     ]
   }
 }

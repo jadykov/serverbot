@@ -58,7 +58,7 @@ export function resolveImageProvider(preferredId: string): ImageProvider {
   throw new ProviderNotConfiguredError(imageProviders.map((provider) => provider.setupHint));
 }
 
-/** Сводка по всем провайдерам — используется в /status, /test и /ai. */
+/** Сводка по всем провайдерам — используется в /status, /test и /health. */
 export function describeProviders(): Array<{ id: string; title: string; kind: 'текст' | 'картинки'; ready: boolean }> {
   return [
     ...textProviders.map((provider) => ({

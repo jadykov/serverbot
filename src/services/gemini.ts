@@ -225,7 +225,7 @@ export class GeminiProvider implements TextProvider {
             'Google блокирует диапазоны многих хостингов целиком.\n\n' +
             'Что можно сделать:\n' +
             '• поднять прокси в разрешённом регионе и указать его в GEMINI_BASE_URL;\n' +
-            '• переключиться на OpenAI-совместимый провайдер (OPENAI_BASE_URL, например OpenRouter) и команду /ask;\n' +
+            '• переключиться на OpenAI-совместимый провайдер (OPENAI_BASE_URL, например OpenRouter);\n' +
             '• перенести бота на хостинг с другим диапазоном адресов.',
           { cause: error, kind: 'geo' },
         );

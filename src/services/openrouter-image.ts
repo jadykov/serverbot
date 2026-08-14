@@ -28,6 +28,20 @@ interface ImagesResponse {
   error?: { message?: string };
 }
 
+/**
+ * Сводит запрошенные пиксели к пропорции, которой оперирует API.
+ *
+ * Точный размер задать нельзя: модель отдаёт картинку одной из трёх форм,
+ * и выбирается именно форма, а не число пикселей. Поэтому из width/height
+ * берётся только их отношение.
+ */
+function pickAspectRatio(width: number, height: number): string {
+  const ratio = width / height;
+  if (ratio > 1.15) return '3:2';
+  if (ratio < 0.87) return '2:3';
+  return '1:1';
+}
+
 export class OpenRouterImageProvider implements ImageProvider {
   readonly id = 'openrouter';
   readonly title = 'OpenRouter (картинки)';
@@ -44,10 +58,22 @@ export class OpenRouterImageProvider implements ImageProvider {
       throw new ProviderRequestError(this.id, this.setupHint, { kind: 'auth' });
     }
 
-    const { model, quality, format } = config.openrouter.image;
-    // Размер можно передать вызовом, иначе берём настроенный по умолчанию.
-    const resolution =
-      options.width && options.height ? `${options.width}x${options.height}` : config.openrouter.image.resolution;
+    const { model, quality, format, resolution } = config.openrouter.image;
+    const aspectRatio =
+      options.width && options.height
+        ? pickAspectRatio(options.width, options.height)
+        : config.openrouter.image.aspectRatio;
+
+    // resolution уходит, только если его задали явно: основная модель его
+    // игнорирует, а лишнее поле в запросе — повод для 400 у соседних.
+    const body: Record<string, unknown> = {
+      model,
+      prompt,
+      quality,
+      aspect_ratio: aspectRatio,
+      output_format: format,
+    };
+    if (resolution) body.resolution = resolution;
 
     const startedAt = Date.now();
 
@@ -59,7 +85,7 @@ export class OpenRouterImageProvider implements ImageProvider {
           'content-type': 'application/json',
           authorization: `Bearer ${config.openrouter.apiKey}`,
         },
-        body: JSON.stringify({ model, prompt, resolution, quality, output_format: format }),
+        body: JSON.stringify(body),
         signal: AbortSignal.timeout(config.ai.timeoutMs),
       });
     } catch (error) {
@@ -110,7 +136,7 @@ export class OpenRouterImageProvider implements ImageProvider {
     const elapsedMs = Date.now() - startedAt;
     const costUsd = data.usage?.cost;
 
-    logger.info('Картинка сгенерирована', { model, resolution, quality, ms: elapsedMs, costUsd });
+    logger.info('Картинка сгенерирована', { model, aspectRatio, quality, ms: elapsedMs, costUsd });
 
     return {
       data: Buffer.from(image.b64_json, 'base64'),

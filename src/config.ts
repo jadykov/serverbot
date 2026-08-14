@@ -172,7 +172,7 @@ export const config = {
         'gemma-4-26b-a4b-it',
         'gemini-3-flash-preview',
       ]),
-      /** Запросы «/гем мышление ...»: дневная квота маленькая, тратится осознанно. */
+      /** Запросы «/гем контекст ...»: дневная квота маленькая, тратится осознанно. */
       think: envStringList('GEMINI_CHAIN_THINK', [
         'gemini-3.7-flash',
         'gemini-3.6-flash',
@@ -201,10 +201,29 @@ export const config = {
     baseUrl: envString('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1').replace(/\/+$/, ''),
     image: {
       model: envString('OPENROUTER_IMAGE_MODEL', 'openai/gpt-image-1-mini'),
-      resolution: envString('OPENROUTER_IMAGE_RESOLUTION', '1024x1024'),
-      /** low обходится примерно в полцента за картинку — для чата этого хватает. */
+      /**
+       * Пропорция — единственное, что реально управляет ценой.
+       *
+       * Замерено: модель отдаёт картинку только трёх форм, и от формы зависит
+       * число оплачиваемых токенов. Квадрат 1:1 — 272 токена ($0,0022), портрет
+       * и ландшафт — 400–408 ($0,0033). Без явной пропорции модель выбирает
+       * форму сама, и цена гуляет в полтора раза от запроса к запросу.
+       */
+      aspectRatio: envString('OPENROUTER_IMAGE_ASPECT_RATIO', '1:1'),
+      /**
+       * Ступень разрешения: 512 | 1K | 2K | 4K (пиксели API не принимает).
+       * Пусто по умолчанию, потому что gpt-image-1-mini этот параметр
+       * игнорирует: и на «512», и на «1K» приходит одно и то же. Оставлено
+       * для моделей, которые его понимают.
+       */
+      resolution: envString('OPENROUTER_IMAGE_RESOLUTION', ''),
       quality: envString('OPENROUTER_IMAGE_QUALITY', 'low'),
-      format: envString('OPENROUTER_IMAGE_FORMAT', 'png'),
+      /**
+       * jpeg, а не png: при одинаковой цене файл выходит в тридцать раз легче
+       * (50 КБ против 1,5 МБ), а Telegram всё равно пережимает фотографии
+       * в jpeg при отправке — png был бы чистой потерей трафика.
+       */
+      format: envString('OPENROUTER_IMAGE_FORMAT', 'jpeg'),
     },
   },
 } as const;

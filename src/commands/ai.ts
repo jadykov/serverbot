@@ -1,5 +1,15 @@
 /**
- * Команды, работающие с нейросетями: /гем (/gem), /ask, /draw, /ai, /reset.
+ * Команды, работающие с нейросетями: /гем (/gem) и /reset.
+ *
+ * Точка входа намеренно одна. Раньше рядом жили /ask и /ai — выбор провайдера
+ * кнопками и запрос к выбранному, — но текстовый провайдер настроен ровно один,
+ * так что /ask сводился к тому же Gemini, только без слов-переключателей,
+ * а /ai предлагал меню, в котором нечего выбирать.
+ *
+ * Что умеет /гем, задаётся первым словом запроса:
+ *   /гем <вопрос>            — обычный ответ цепочкой, выбранной для раздела;
+ *   /гем контекст <задача>   — сильная цепочка (латинская форма: context);
+ *   /гем нарисуй <описание>  — картинка вместо текста (латинская форма: draw).
  *
  * Про две формы команды Gemini
  * ----------------------------
@@ -12,17 +22,10 @@
  *     работает всегда, в группах — только если у бота отключён privacy mode
  *     (@BotFather → /setprivacy → Disable).
  */
-import { GrammyError, InlineKeyboard, InputFile, type Bot } from 'grammy';
+import { GrammyError, InputFile, type Bot } from 'grammy';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
-import {
-  describeProviders,
-  findTextProvider,
-  imageProviders,
-  resolveImageProvider,
-  resolveTextProvider,
-  textProviders,
-} from '../services/registry.js';
+import { findTextProvider, resolveImageProvider } from '../services/registry.js';
 import { escapeHtml, markdownToTelegramHtml, splitMarkdown } from '../format.js';
 import { withChatAction } from '../utils.js';
 import { collectAlbumPart, downloadAttachment, pickPhotoFileId } from '../media.js';
@@ -47,7 +50,7 @@ const GEMINI_ID = 'gemini';
 const CYRILLIC_GEM = /^\/гем(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/i;
 
 /**
- * Слово-переключатель в начале запроса: «/гем мышление ...», «/gem think ...».
+ * Слово-переключатель в начале запроса: «/гем контекст ...», «/gem context ...».
  *
  * Отдельной командой это не сделано намеренно. Точка входа к нейросети одна,
  * её и надо помнить; а меню Telegram не засоряется ещё одним пунктом, который
@@ -55,10 +58,16 @@ const CYRILLIC_GEM = /^\/гем(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/i;
  *
  * Разделитель после слова прописан явно, а не через \b: в JavaScript граница
  * слова определяется по латинице, и с кириллицей \b просто не срабатывает —
- * «мышление что-то» не совпало бы вообще. Заодно такая запись не ловит
- * «мышления» и «thinking», где слово лишь начинается похоже.
+ * «контекст чего-то» не совпало бы вообще. Заодно такая запись не ловит
+ * «контекстный» и «contextual», где слово лишь начинается похоже.
  */
-const THINK_PREFIX = /^(?:мышление|think)(?:[\s,:.—–-]+([\s\S]*))?$/i;
+const CONTEXT_PREFIX = /^(?:контекст|context)(?:[\s,:.—–-]+([\s\S]*))?$/i;
+
+/**
+ * Второе слово-переключатель, по тому же принципу: «/гем нарисуй ...»,
+ * «/gem draw ...» — вместо ответа текстом бот рисует картинку.
+ */
+const DRAW_PREFIX = /^(?:нарисуй|draw)(?:[\s,:.—–-]+([\s\S]*))?$/i;
 
 /**
  * Та же команда, но в подписи к фотографии: «/гем что здесь написано».
@@ -211,7 +220,7 @@ function extractPrompt(ctx: BotContext, args: string): string {
  * Обработчик /гем и /gem.
  *
  * По умолчанию работает цепочкой, выбранной для раздела командой /режим.
- * Если запрос начинается со слова «мышление» (или «think»), вместо неё берётся
+ * Если запрос начинается со слова «контекст» (или «context»), вместо неё берётся
  * сильная цепочка — какой бы режим в разделе ни стоял. Дневная норма у этих
  * моделей небольшая, поэтому переключение всегда явное.
  */
@@ -220,21 +229,29 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
     await ctx.reply(
       'Напишите запрос после команды. Например:\n' +
         '<code>/гем объясни рекурсию за три предложения</code>\n\n' +
-        'Для сложной задачи добавьте слово «мышление» — возьму модель посильнее:\n' +
-        '<code>/гем мышление почему этот SQL висит на большой таблице</code>\n\n' +
+        'Два слова меняют поведение:\n' +
+        '<code>/гем контекст почему этот SQL висит</code> — модель посильнее\n' +
+        '<code>/гем нарисуй кота-космонавта</code> — картинка вместо текста\n\n' +
         'Ещё можно ответить командой <code>/гем</code> на любое сообщение — я возьму его текст.',
       { parse_mode: 'HTML' },
     );
     return;
   }
 
-  const think = THINK_PREFIX.exec(rawPrompt.trim());
+  // «нарисуй» уводит запрос в совсем другую ветку — проверяем его первым.
+  const draw = DRAW_PREFIX.exec(rawPrompt.trim());
+  if (draw) {
+    await handleDraw(ctx, (draw[1] ?? '').trim());
+    return;
+  }
+
+  const think = CONTEXT_PREFIX.exec(rawPrompt.trim());
   const prompt = think ? (think[1] ?? '').trim() : rawPrompt;
 
   if (think && !prompt) {
     await ctx.reply(
-      'После «мышление» нужна сама задача. Например:\n' +
-        '<code>/гем мышление почему этот SQL висит на большой таблице</code>\n\n' +
+      'После «контекст» нужна сама задача. Например:\n' +
+        '<code>/гем контекст почему этот SQL висит на большой таблице</code>\n\n' +
         'Эти модели сильнее, но их дневная норма невелика — для обычных вопросов ' +
         'хватает просто <code>/гем</code>.',
       { parse_mode: 'HTML' },
@@ -295,38 +312,41 @@ async function handlePhotos(ctx: BotContext, fileIds: string[], caption: string)
   }
 }
 
-/** Клавиатура выбора провайдера. Активный помечен зелёным, ненастроенный — замком. */
-function buildProviderKeyboard(ctx: BotContext): InlineKeyboard {
-  const keyboard = new InlineKeyboard();
-
-  for (const provider of textProviders) {
-    const mark = provider.id === ctx.session.textProviderId ? '🟢' : provider.isConfigured ? '⚪️' : '🔒';
-    keyboard.text(`${mark} текст: ${provider.title}`, `set:text:${provider.id}`).row();
+/**
+ * Рисование по запросу «/гем нарисуй ...».
+ *
+ * Единственное место в боте, которое стоит денег, поэтому фактическая цена
+ * вызова уходит прямо в подпись под картинкой: в общей компании расход
+ * честнее держать на виду.
+ */
+async function handleDraw(ctx: BotContext, prompt: string): Promise<void> {
+  if (!prompt) {
+    await ctx.reply(
+      'Опишите картинку после слова «нарисуй». Например:\n' +
+        '<code>/гем нарисуй кота-космонавта в стиле акварели</code>',
+      { parse_mode: 'HTML' },
+    );
+    return;
   }
-  for (const provider of imageProviders) {
-    const mark = provider.id === ctx.session.imageProviderId ? '🟢' : provider.isConfigured ? '⚪️' : '🔒';
-    keyboard.text(`${mark} картинки: ${provider.title}`, `set:image:${provider.id}`).row();
+
+  try {
+    const provider = resolveImageProvider(ctx.session.imageProviderId);
+    const notice = await ctx.reply('🎨 Рисую… это занимает 10–60 секунд.');
+
+    const image = await withChatAction(ctx, 'upload_photo', () => provider.generateImage(prompt));
+
+    // InputFile умеет отправлять Buffer напрямую — сохранять файл на диск не нужно.
+    const extension = image.mimeType === 'image/jpeg' ? 'jpg' : 'png';
+    const price = image.costUsd !== undefined ? `, $${image.costUsd.toFixed(4)}` : '';
+    await ctx.replyWithPhoto(new InputFile(image.data, `image.${extension}`), {
+      caption: `🖼 ${prompt.slice(0, 900)}\n\n${provider.title}, ${(image.elapsedMs / 1000).toFixed(1)} с${price}`,
+    });
+
+    // Убираем служебное сообщение «Рисую…», чтобы не мусорить в чате.
+    await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
+  } catch (error) {
+    await replyWithError(ctx, error);
   }
-
-  return keyboard;
-}
-
-/** Текст сообщения со списком провайдеров. */
-function buildProviderMessage(ctx: BotContext): string {
-  return [
-    '<b>Подключённые нейросети</b>',
-    '',
-    ...describeProviders().map(
-      (provider) =>
-        `${provider.ready ? '✅' : '🔒'} <b>${escapeHtml(provider.title)}</b> — ${provider.kind}` +
-        (provider.ready ? '' : ' (нет ключей в .env)'),
-    ),
-    '',
-    `Сейчас активны: <code>${escapeHtml(ctx.session.textProviderId)}</code> для текста, ` +
-      `<code>${escapeHtml(ctx.session.imageProviderId)}</code> для картинок.`,
-    '',
-    '<i>Выбор влияет на /ask. Команда /гем всегда обращается к Gemini.</i>',
-  ].join('\n');
 }
 
 export function registerAiCommands(bot: Bot<BotContext>): void {
@@ -344,107 +364,6 @@ export function registerAiCommands(bot: Bot<BotContext>): void {
     if (addressee && addressee.toLowerCase() !== ctx.me.username.toLowerCase()) return;
 
     await handleGemini(ctx, extractPrompt(ctx, match?.[2] ?? ''));
-  });
-
-  // ------------------------------------------------------------------ /ask
-  // Работает через провайдера, выбранного в /ai (по умолчанию тот же Gemini).
-  bot.command('ask', async (ctx) => {
-    const prompt = extractPrompt(ctx, ctx.match);
-
-    if (!prompt) {
-      await ctx.reply(
-        'Задайте вопрос после команды. Например:\n<code>/ask объясни рекурсию за 3 предложения</code>',
-        { parse_mode: 'HTML' },
-      );
-      return;
-    }
-
-    try {
-      const provider = resolveTextProvider(ctx.session.textProviderId);
-      // У Gemini есть цепочка резервных моделей, у остальных провайдеров —
-      // одна модель из .env, перебирать там нечего.
-      const models = provider.id === GEMINI_ID ? resolveChain(ctx.session.chainId).models : [];
-      await askChain(ctx, provider, models, prompt);
-    } catch (error) {
-      await replyWithError(ctx, error);
-    }
-  });
-
-  // ----------------------------------------------------------------- /draw
-  bot.command('draw', async (ctx) => {
-    const prompt = extractPrompt(ctx, ctx.match);
-
-    if (!prompt) {
-      await ctx.reply('Опишите картинку. Например:\n<code>/draw кот-космонавт в стиле акварели</code>', {
-        parse_mode: 'HTML',
-      });
-      return;
-    }
-
-    try {
-      const provider = resolveImageProvider(ctx.session.imageProviderId);
-      const notice = await ctx.reply('🎨 Рисую… это занимает 10–60 секунд.');
-
-      const image = await withChatAction(ctx, 'upload_photo', () => provider.generateImage(prompt));
-
-      // InputFile умеет отправлять Buffer напрямую — сохранять файл на диск не нужно.
-      const extension = image.mimeType === 'image/jpeg' ? 'jpg' : 'png';
-      // Стоимость показываем прямо в подписи: это единственное, за что бот
-      // платит, и в общей компании расход честнее держать на виду.
-      const price = image.costUsd !== undefined ? `, $${image.costUsd.toFixed(4)}` : '';
-      await ctx.replyWithPhoto(new InputFile(image.data, `image.${extension}`), {
-        caption: `🖼 ${prompt.slice(0, 900)}\n\n${provider.title}, ${(image.elapsedMs / 1000).toFixed(1)} с${price}`,
-      });
-
-      // Убираем служебное сообщение «Рисую…», чтобы не мусорить в чате.
-      await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
-    } catch (error) {
-      await replyWithError(ctx, error);
-    }
-  });
-
-  // ------------------------------------------------------------------- /ai
-  bot.command('ai', async (ctx) => {
-    await ctx.reply(buildProviderMessage(ctx), {
-      parse_mode: 'HTML',
-      reply_markup: buildProviderKeyboard(ctx),
-    });
-  });
-
-  // Нажатие на кнопку выбора провайдера.
-  bot.callbackQuery(/^set:(text|image):/, async (ctx) => {
-    // Разбираем callback_data вручную: так проще и типобезопаснее.
-    const [, kind, providerId] = ctx.callbackQuery.data.split(':');
-    if (!kind || !providerId) {
-      await ctx.answerCallbackQuery({ text: 'Непонятная кнопка' });
-      return;
-    }
-
-    const provider =
-      kind === 'text'
-        ? textProviders.find((item) => item.id === providerId)
-        : imageProviders.find((item) => item.id === providerId);
-
-    if (!provider) {
-      await ctx.answerCallbackQuery({ text: 'Такого провайдера больше нет' });
-      return;
-    }
-
-    if (!provider.isConfigured) {
-      // show_alert — Telegram покажет всплывающее окно вместо тоста.
-      await ctx.answerCallbackQuery({ text: `${provider.title}: нет ключей в .env`, show_alert: true });
-      return;
-    }
-
-    if (kind === 'text') ctx.session.textProviderId = provider.id;
-    else ctx.session.imageProviderId = provider.id;
-
-    await ctx.answerCallbackQuery({ text: `Выбрано: ${provider.title}` });
-    // Перерисовываем сообщение, чтобы галочка переехала на новую кнопку.
-    await ctx.editMessageText(buildProviderMessage(ctx), {
-      parse_mode: 'HTML',
-      reply_markup: buildProviderKeyboard(ctx),
-    });
   });
 
   // ---------------------------------------------------------------- /reset

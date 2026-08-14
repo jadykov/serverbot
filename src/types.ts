@@ -26,7 +26,7 @@ export interface SessionData {
   textProviderId: string;
   /** Выбранный провайдер картинок (id из реестра). */
   imageProviderId: string;
-  /** Короткая история диалога для команды /ask. */
+  /** Короткая история диалога раздела. */
   history: ChatMessage[];
   /** Цепочка моделей этого топика (id из src/models.ts). */
   chainId?: string;

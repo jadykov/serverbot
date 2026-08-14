@@ -19,11 +19,9 @@ const HELP_TEXT = [
   '',
   '<b>Нейросети</b>',
   '/гем <i>запрос</i> — спросить Gemini (то же самое: /gem)',
-  '/гем мышление <i>задача</i> — то же, но моделью посильнее (то же: /gem think)',
-  '/ask <i>вопрос</i> — спросить нейросеть, выбранную в /ai',
-  '/draw <i>описание</i> — нарисовать картинку (платно, через OpenRouter)',
+  '/гем контекст <i>задача</i> — то же, но моделью посильнее (то же: /gem context)',
+  '/гем нарисуй <i>описание</i> — картинка вместо текста, платно (то же: /gem draw)',
   '/режим — настроить раздел: цепочку моделей и свой промпт (то же: /mode)',
-  '/ai — показать провайдеров и переключить активного',
   '/reset — очистить историю диалога',
   '',
   '<i>Картинку можно просто прислать в чат — я её разберу. В группе добавьте</i>',
@@ -145,8 +143,8 @@ export function registerBasicCommands(bot: Bot<BotContext>): void {
         (provider) => `${provider.ready ? '✅' : '⚪️'} ${escapeHtml(provider.title)} — ${provider.kind}`,
       ),
       '',
-      `Активная текстовая модель: <code>${escapeHtml(ctx.session.textProviderId)}</code>`,
-      `Активная модель картинок: <code>${escapeHtml(ctx.session.imageProviderId)}</code>`,
+      `Текст: <code>${escapeHtml(ctx.session.textProviderId)}</code>, ` +
+        `картинки: <code>${escapeHtml(ctx.session.imageProviderId)}</code>`,
       `Сообщений в истории диалога: ${ctx.session.history.length}`,
     ];
 
