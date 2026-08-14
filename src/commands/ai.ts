@@ -27,11 +27,12 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { findTextProvider } from '../services/registry.js';
 import { escapeHtml, markdownToTelegramHtml, splitMarkdown } from '../format.js';
-import { withChatAction } from '../utils.js';
+import { sessionKey, withChatAction } from '../utils.js';
 import { collectAlbumPart, downloadAttachment, pickPhotoFileId } from '../media.js';
 import { generateWithChain } from '../services/chain.js';
 import { startDraw } from './draw.js';
 import { synthesizeSpeech } from '../services/gemini-tts.js';
+import { rememberMessage, searchMessages } from '../services/search-index.js';
 import { resolveChain, THINK_CHAIN } from '../models.js';
 import {
   ProviderNotConfiguredError,
@@ -78,6 +79,12 @@ const DRAW_PREFIX = /^(?:нарисуй|draw)(?:[\s,:.—–-]+([\s\S]*))?$/i;
  * это и нужно — прочитал ответ, захотел послушать.
  */
 const SPEAK_PREFIX = /^(?:скажи|say)(?:[\s,:.—–-]+([\s\S]*))?$/i;
+
+/**
+ * Четвёртое слово-переключатель: «/гем найди ...» — поиск по переписке
+ * раздела. Ищет по смыслу, а не по буквам (см. src/services/search-index.ts).
+ */
+const SEARCH_PREFIX = /^(?:найди|найти|find)(?:[\s,:.—–-]+([\s\S]*))?$/i;
 
 /**
  * Та же команда, но в подписи к фотографии: «/гем что здесь написано».
@@ -184,6 +191,11 @@ async function askChain(
       // Контекст при этом не теряется — что было на снимке, модель описала
       // в своём же ответе, а он в истории есть.
       ctx.session.history.push({ role: 'user', text: prompt }, { role: 'assistant', text: answer.text });
+      // Ответы бота идут в архив поиска наравне с репликами людей: в них
+      // половина полезного, что вообще было сказано в разделе. Ссылки на них
+      // не будет — id сообщения станет известен только после отправки.
+      const key = sessionKey(ctx);
+      if (key) rememberMessage(key, { ts: Date.now(), who: 'бот', text: answer.text });
       // Держим в памяти только последние N сообщений.
       ctx.session.history = ctx.session.history.slice(-config.ai.historyLimit);
     }
@@ -261,6 +273,12 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
     return;
   }
 
+  const search = SEARCH_PREFIX.exec(rawPrompt.trim());
+  if (search) {
+    await handleSearch(ctx, (search[1] ?? '').trim());
+    return;
+  }
+
   const speak = SPEAK_PREFIX.exec(rawPrompt.trim());
   if (speak) {
     await handleSpeak(ctx, (speak[1] ?? '').trim());
@@ -286,6 +304,85 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
 
   const chain = think ? resolveChain(THINK_CHAIN) : resolveChain(ctx.session.chainId);
   await askChain(ctx, gemini, chain.models, prompt);
+}
+
+/**
+ * Ссылка на сообщение в чате.
+ *
+ * У приватных супергрупп (а форум — всегда супергруппа) публичной ссылки нет,
+ * но есть внутренняя: t.me/c/<id без префикса -100>/<id сообщения>. В личке
+ * ссылаться не на что и незачем — там и так всё рядом.
+ */
+function messageLink(chatId: number, messageId: number | undefined): string | null {
+  if (messageId === undefined || chatId >= 0) return null;
+  return `https://t.me/c/${String(chatId).replace(/^-100/, '')}/${messageId}`;
+}
+
+/** Дата находки человеческим языком: «14 августа, 16:12». */
+function formatWhen(ts: number): string {
+  return new Intl.DateTimeFormat('ru-RU', {
+    day: 'numeric',
+    month: 'long',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: config.imageQuota.timezone,
+  }).format(new Date(ts));
+}
+
+/**
+ * Поиск по переписке раздела: «/гем найди ...».
+ *
+ * Ищет по смыслу: «где мы обсуждали выкатку» находит разговор про деплой,
+ * даже если слова «выкатка» там не было.
+ */
+async function handleSearch(ctx: BotContext, query: string): Promise<void> {
+  if (!query) {
+    await ctx.reply(
+      'Напишите, что искать:\n<code>/гем найди где мы обсуждали деплой</code>\n\n' +
+        'Я ищу по смыслу, а не по точным словам, и только по этому разделу.',
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
+  if (!config.search.enabled) {
+    await ctx.reply('🔍 Поиск по переписке выключен (SEARCH_ENABLED=false).');
+    return;
+  }
+
+  const key = sessionKey(ctx);
+  if (!key) return;
+
+  try {
+    const hits = await withChatAction(ctx, 'typing', () => searchMessages(key, query));
+
+    if (hits.length === 0) {
+      await ctx.reply(
+        '🔍 Ничего похожего не нашлось.\n\n' +
+          '<i>Я ищу только по этому разделу и только по тому, что было сказано после ' +
+          'включения поиска: задним числом переписка не индексируется.</i>',
+        { parse_mode: 'HTML' },
+      );
+      return;
+    }
+
+    const chatId = ctx.chat?.id ?? 0;
+    const lines = hits.map((hit) => {
+      const link = messageLink(chatId, hit.messageId);
+      const when = formatWhen(hit.ts);
+      const snippet = escapeHtml(hit.text.slice(0, 300)) + (hit.text.length > 300 ? '…' : '');
+      const head = link ? `<a href="${link}">${when}</a>` : when;
+
+      return `${head}, ${escapeHtml(hit.who)}:\n${snippet}`;
+    });
+
+    await ctx.reply(`🔍 <b>Нашёл по смыслу:</b>\n\n${lines.join('\n\n')}`, {
+      parse_mode: 'HTML',
+      link_preview_options: { is_disabled: true },
+    });
+  } catch (error) {
+    await replyWithError(ctx, error);
+  }
 }
 
 /**

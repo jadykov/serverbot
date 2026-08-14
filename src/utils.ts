@@ -3,6 +3,31 @@
  */
 import type { BotContext } from './types.js';
 
+/**
+ * Контекст без самой сессии: именно такой grammY передаёт в getSessionKey —
+ * ключ считается до того, как сессия загружена.
+ */
+type SessionlessContext = Omit<BotContext, 'session'>;
+
+/**
+ * Ключ раздела: id чата, а в форуме — id чата и топика.
+ *
+ * По нему живёт сессия (см. src/bot.ts), и по нему же лежит архив поиска.
+ * Функция вынесена сюда именно поэтому: ключ обязан совпадать до символа,
+ * иначе настройки раздела окажутся в одном месте, а его переписка в другом.
+ * Разделитель — подчёркивание, а не двоеточие: ключ становится именем файла.
+ */
+export function sessionKey(ctx: SessionlessContext): string | undefined {
+  const chatId = ctx.chat?.id;
+  if (chatId === undefined) return undefined;
+
+  const message = ctx.message ?? ctx.callbackQuery?.message;
+  const isTopic = message && 'is_topic_message' in message && message.is_topic_message;
+  const threadId = isTopic ? message.message_thread_id : undefined;
+
+  return threadId === undefined ? String(chatId) : `${chatId}_${threadId}`;
+}
+
 /** Пауза на указанное число миллисекунд. */
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

@@ -12,11 +12,13 @@ import { describeError, logger } from './logger.js';
 import { requestLogger } from './middlewares/logging.js';
 import { replyToSender } from './middlewares/reply.js';
 import { rateLimit } from './middlewares/rateLimit.js';
+import { searchIndexer } from './middlewares/searchIndex.js';
 import { registerBasicCommands } from './commands/basic.js';
 import { registerAiCommands } from './commands/ai.js';
 import { registerDrawCommands } from './commands/draw.js';
 import { registerModeCommands } from './commands/mode.js';
 import { MAIN_CHAIN } from './models.js';
+import { sessionKey } from './utils.js';
 import { DEFAULT_IMAGE_PROVIDER_ID, DEFAULT_TEXT_PROVIDER_ID } from './services/registry.js';
 import type { BotContext, SessionData } from './types.js';
 
@@ -26,7 +28,7 @@ export const BOT_COMMANDS = [
   { command: 'help', description: 'Список всех команд' },
   // Кириллическую /гем в это меню добавить нельзя: Telegram принимает
   // в именах команд только латиницу (иначе BOT_COMMAND_INVALID).
-  { command: 'gem', description: 'Запрос к Gemini (то же, что /гем). Слова: context, draw, say' },
+  { command: 'gem', description: 'Запрос к Gemini (то же, что /гем). Слова: context, draw, say, find' },
   // Кириллическую /режим в меню тоже добавить нельзя — только латиницу.
   { command: 'mode', description: 'Режим раздела: цепочка моделей и промпт (то же, что /режим)' },
   { command: 'reset', description: 'Очистить историю диалога' },
@@ -68,25 +70,22 @@ export function createBot(): Bot<BotContext> {
       storage: new FileAdapter<SessionData>({ dirName: config.session.dir }),
       // Ключ сессии по умолчанию — id чата. Для форумов добавляем id топика:
       // так в каждом топике будет собственная история диалога и свои настройки,
-      // и они не перемешиваются между собой. Ключ становится именем файла,
-      // поэтому разделитель — подчёркивание, а не двоеточие.
-      getSessionKey: (ctx) => {
-        const chatId = ctx.chat?.id;
-        if (chatId === undefined) return undefined;
-
-        const message = ctx.message ?? ctx.callbackQuery?.message;
-        const isTopic = message && 'is_topic_message' in message && message.is_topic_message;
-        const threadId = isTopic ? message.message_thread_id : undefined;
-
-        return threadId === undefined ? String(chatId) : `${chatId}_${threadId}`;
-      },
+      // и они не перемешиваются между собой. Сам ключ считает sessionKey
+      // в src/utils.ts: по нему же лежит архив поиска, и разъехаться они
+      // не должны — иначе настройки раздела окажутся в одном месте,
+      // а его переписка в другом.
+      getSessionKey: sessionKey,
     }),
   );
 
   // 4. Защита от спама.
   bot.use(rateLimit);
 
-  // 5. Команды. registerAiCommands — последней: внутри неё висит «ловушка»
+  // 5. Архив переписки для поиска по смыслу. Стоит после рейт-лимита:
+  //    отбитый спам индексировать незачем.
+  bot.use(searchIndexer);
+
+  // 6. Команды. registerAiCommands — последней: внутри неё висит «ловушка»
   //    для обычных сообщений, и она должна получать управление после всех.
   //    registerDrawCommands стоит перед ней по той же причине: правка промпта
   //    приходит обычным сообщением, и перехватить его надо раньше ловушки.
@@ -95,7 +94,7 @@ export function createBot(): Bot<BotContext> {
   registerDrawCommands(bot);
   registerAiCommands(bot);
 
-  // 6. Глобальная ловушка ошибок: без неё любое исключение
+  // 7. Глобальная ловушка ошибок: без неё любое исключение
   //    в обработчике уронит поллинг.
   bot.catch(async (botError) => {
     const { ctx, error } = botError;
