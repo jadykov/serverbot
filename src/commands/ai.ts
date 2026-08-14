@@ -30,6 +30,7 @@ import { escapeHtml, markdownToTelegramHtml, splitMarkdown } from '../format.js'
 import { withChatAction } from '../utils.js';
 import { collectAlbumPart, downloadAttachment, pickPhotoFileId } from '../media.js';
 import { generateWithChain } from '../services/chain.js';
+import { releaseImageSlot, reserveImageSlot } from '../services/image-quota.js';
 import { resolveChain, THINK_CHAIN } from '../models.js';
 import {
   ProviderNotConfiguredError,
@@ -317,7 +318,8 @@ async function handlePhotos(ctx: BotContext, fileIds: string[], caption: string)
  *
  * Единственное место в боте, которое стоит денег, поэтому фактическая цена
  * вызова уходит прямо в подпись под картинкой: в общей компании расход
- * честнее держать на виду.
+ * честнее держать на виду. По той же причине здесь дневная норма на человека
+ * (src/services/image-quota.ts) — в отличие от текста, который бесплатен.
  */
 async function handleDraw(ctx: BotContext, prompt: string): Promise<void> {
   if (!prompt) {
@@ -325,6 +327,18 @@ async function handleDraw(ctx: BotContext, prompt: string): Promise<void> {
       'Опишите картинку после слова «нарисуй». Например:\n' +
         '<code>/гем нарисуй кота-космонавта в стиле акварели</code>',
       { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
+  const userId = ctx.from?.id;
+  const quota = await reserveImageSlot(userId);
+
+  if (!quota.allowed) {
+    await ctx.reply(
+      `🚫 На сегодня картинки закончились: ${quota.limit} в день на человека — ` +
+        `рисование единственное, что стоит денег.\n\nНорма обновится через ${quota.resetsIn}. ` +
+        'Текстовые запросы работают как обычно.',
     );
     return;
   }
@@ -338,13 +352,18 @@ async function handleDraw(ctx: BotContext, prompt: string): Promise<void> {
     // InputFile умеет отправлять Buffer напрямую — сохранять файл на диск не нужно.
     const extension = image.mimeType === 'image/jpeg' ? 'jpg' : 'png';
     const price = image.costUsd !== undefined ? `, $${image.costUsd.toFixed(4)}` : '';
+    // Остаток показываем сразу: иначе о лимите узнают только упёршись в него.
+    const left = Number.isFinite(quota.remaining) ? `\nОсталось на сегодня: ${quota.remaining} из ${quota.limit}` : '';
     await ctx.replyWithPhoto(new InputFile(image.data, `image.${extension}`), {
-      caption: `🖼 ${prompt.slice(0, 900)}\n\n${provider.title}, ${(image.elapsedMs / 1000).toFixed(1)} с${price}`,
+      caption: `🖼 ${prompt.slice(0, 900)}\n\n${provider.title}, ${(image.elapsedMs / 1000).toFixed(1)} с${price}${left}`,
     });
 
     // Убираем служебное сообщение «Рисую…», чтобы не мусорить в чате.
     await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
   } catch (error) {
+    // Картинки не вышло — возвращаем слот: платить за чужую ошибку нормой
+    // пользователя нечестно, денег с нас за неудачный вызов тоже не берут.
+    await releaseImageSlot(userId);
     await replyWithError(ctx, error);
   }
 }
