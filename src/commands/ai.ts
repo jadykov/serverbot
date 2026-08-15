@@ -43,6 +43,7 @@ import { startDraw } from './draw.js';
 import { synthesizeSpeech } from '../services/gemini-tts.js';
 import { rememberMessage, searchMessages } from '../services/search-index.js';
 import { BOX_COLORS, drawBoxes, findObjects } from '../services/pointing.js';
+import { prepareDocument } from '../services/documents.js';
 import { resolveChain, THINK_CHAIN } from '../models.js';
 import {
   ProviderNotConfiguredError,
@@ -292,6 +293,12 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
    * «!найди» и «!контекст» пропускает дальше: они про своё, и то, что рядом
    * оказалась фотография, ничего в них не меняет.
    */
+  const repliedDocument = ctx.message?.reply_to_message?.document;
+  if (repliedDocument) {
+    await handleDocument(ctx, repliedDocument.file_id, repliedDocument.file_name ?? 'файл', `/гем ${rawPrompt}`);
+    return;
+  }
+
   const repliedPhoto = pickPhotoFileId(ctx.message?.reply_to_message?.photo ?? []);
   const ownsPhoto =
     repliedPhoto &&
@@ -655,6 +662,62 @@ async function handlePointing(ctx: BotContext, image: Attachment, query: string)
   }
 }
 
+/**
+ * Присланный файл: книга, статья, выгрузка.
+ *
+ * Всегда уходит цепочкой флешей, какой бы режим ни стоял в разделе: у Gemma
+ * окно 262 тысячи токенов против миллиона у них, а PDF она не принимает вовсе.
+ *
+ * Текст файла попадает в запрос, но не в историю — иначе одна книга занимала бы
+ * контекст следующие триста сообщений. В историю уходит только строчка о том,
+ * что файл был, и ответ модели: этого хватает, чтобы дальше спрашивать «а что
+ * там про X» без повторной пересылки файла.
+ */
+async function handleDocument(ctx: BotContext, fileId: string, fileName: string, caption: string): Promise<void> {
+  const request = resolveImageRequest(ctx, caption);
+  if (!request) return;
+
+  const gemini = await requireGemini(ctx);
+  if (!gemini) return;
+
+  const notice = await ctx.reply(`📄 Читаю «${fileName}»…`);
+
+  try {
+    const file = await withChatAction(ctx, 'typing', () => downloadAttachment(ctx, fileId));
+    const prepared = await prepareDocument(file.data, fileName);
+
+    // Вопрос человека или, если его нет, просьба пересказать: присылать книгу
+    // молча — это обычно «прочитай и расскажи».
+    const question = request.prompt === DEFAULT_IMAGE_PROMPT ? 'Перескажи, о чём этот файл, и выдели главное.' : request.prompt;
+
+    const prompt = prepared.text
+      ? `Файл «${fileName}»:\n\n${prepared.text}\n\n---\n\n${question}`
+      : question;
+
+    await ctx.api
+      .editMessageText(
+        notice.chat.id,
+        notice.message_id,
+        `📄 «${fileName}» — ${prepared.tokens.toLocaleString('ru')} токенов${prepared.note ? `, ${prepared.note}` : ''}. Думаю…`,
+      )
+      .catch(() => undefined);
+
+    await askChain(
+      ctx,
+      gemini,
+      resolveChain(THINK_CHAIN).models,
+      prompt,
+      prepared.attachment ? [prepared.attachment] : [],
+      `Прислал файл «${fileName}» (${prepared.tokens.toLocaleString('ru')} токенов). ${question}`,
+    );
+
+    await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
+  } catch (error) {
+    await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
+    await replyWithError(ctx, error);
+  }
+}
+
 /** Скачивает картинки и отправляет их в модель вместе с вопросом. */
 async function handlePhotos(ctx: BotContext, fileIds: string[], caption: string): Promise<void> {
   const request = resolveImageRequest(ctx, caption);
@@ -736,6 +799,14 @@ export function registerAiCommands(bot: Bot<BotContext>): void {
     }
 
     await handlePhotos(ctx, [fileId], caption);
+  });
+
+  // ------------------------------------------------------------- файлы
+  // Книги, статьи, выгрузки. Правила обращения те же, что у картинок:
+  // в личке достаточно файла, в группе нужна подпись с командой.
+  bot.on('message:document', async (ctx) => {
+    const document = ctx.message.document;
+    await handleDocument(ctx, document.file_id, document.file_name ?? 'файл', ctx.message.caption ?? '');
   });
 
   // --------------------------------------------------- обычные сообщения
