@@ -44,6 +44,7 @@ import { synthesizeSpeech } from '../services/gemini-tts.js';
 import { rememberMessage, searchMessages } from '../services/search-index.js';
 import { BOX_COLORS, drawBoxes, findObjects } from '../services/pointing.js';
 import { prepareDocument } from '../services/documents.js';
+import { handleFile } from './file.js';
 import { resolveChain, THINK_CHAIN } from '../models.js';
 import {
   ProviderNotConfiguredError,
@@ -96,6 +97,12 @@ const DRAW_PREFIX = switchWord('нарисуй|draw');
  * это и нужно — прочитал ответ, захотел послушать.
  */
 const SPEAK_PREFIX = switchWord('скажи|say');
+
+/**
+ * Пятое слово-переключатель: «/гем !файл ...» — ответ отдельным файлом.
+ * Реплаем и без запроса выгружает в файл то сообщение, на которое ответили.
+ */
+const FILE_PREFIX = switchWord('файл|file');
 
 /**
  * Четвёртое слово-переключатель: «/гем найди ...» — поиск по переписке
@@ -294,7 +301,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
    * оказалась фотография, ничего в них не меняет.
    */
   const repliedDocument = ctx.message?.reply_to_message?.document;
-  if (repliedDocument) {
+  if (repliedDocument && !FILE_PREFIX.test(trimmed)) {
     await handleDocument(ctx, repliedDocument.file_id, repliedDocument.file_name ?? 'файл', `/гем ${rawPrompt}`);
     return;
   }
@@ -303,6 +310,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   const ownsPhoto =
     repliedPhoto &&
     !DRAW_PREFIX.test(trimmed) &&
+    !FILE_PREFIX.test(trimmed) &&
     !SPEAK_PREFIX.test(trimmed) &&
     !SEARCH_PREFIX.test(trimmed) &&
     !CONTEXT_PREFIX.test(trimmed);
@@ -348,6 +356,12 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
     } catch (error) {
       await replyWithError(ctx, error);
     }
+    return;
+  }
+
+  const file = FILE_PREFIX.exec(rawPrompt.trim());
+  if (file) {
+    await handleFile(ctx, (file[1] ?? '').trim());
     return;
   }
 
