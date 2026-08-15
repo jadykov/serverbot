@@ -143,7 +143,14 @@ export const config = {
    */
   search: {
     enabled: envBool('SEARCH_ENABLED', true),
-    chain: envStringList('GEMINI_CHAIN_EMBED', ['gemini-embedding-001', 'gemini-embedding-2']),
+    /**
+     * Первой стоит вторая версия — она новее по всем измеренным признакам:
+     * вход 8192 токена против 2048, мультимодальная, считает вдвое быстрее
+     * (586 мс против 995 на семи репликах) и лучше отделяет нужное от лишнего
+     * (отрыв верной находки от худшей 0,296 против 0,184). На бессмысленный
+     * запрос обе честно молчат.
+     */
+    chain: envStringList('GEMINI_CHAIN_EMBED', ['gemini-embedding-2', 'gemini-embedding-001']),
     /**
      * Длина вектора. У модели их до 3072, но для поиска по чату хватает 768:
      * качество на таком объёме неотличимо, а файл втрое легче.
@@ -168,6 +175,16 @@ export const config = {
      */
     minScore: Number(envString('SEARCH_MIN_SCORE', '0.62')),
     scoreGap: Number(envString('SEARCH_SCORE_GAP', '0.08')),
+    /**
+     * Абсолютный порог у каждой модели свой: шкалы у них не совпадают.
+     * Замерено на одной и той же переписке — верная находка «когда Маша
+     * в отпуске» получает 0,714 у gemini-embedding-001 и 0,571
+     * у gemini-embedding-2. Общий порог 0,62 отсёк бы вторую как промах.
+     */
+    minScoreByModel: {
+      'gemini-embedding-2': Number(envString('SEARCH_MIN_SCORE_E2', '0.50')),
+      'gemini-embedding-2-preview': Number(envString('SEARCH_MIN_SCORE_E2', '0.50')),
+    } as Record<string, number | undefined>,
   },
 
   /**

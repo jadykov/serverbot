@@ -38,9 +38,23 @@ export interface IndexedMessage {
   messageId?: number;
 }
 
-/** Запись в файле архива: реплика плюс её вектор в base64. */
+/**
+ * Запись в файле архива: реплика, её вектор в base64 и модель, которая этот
+ * вектор посчитала.
+ *
+ * Модель хранится не для истории, а потому что векторы разных моделей
+ * несравнимы в принципе. Замерено: один и тот же текст, посчитанный
+ * gemini-embedding-001 и gemini-embedding-2, даёт близость −0,03 вместо
+ * единицы. Смешать их в одном файле — значит получить мусор в выдаче,
+ * поэтому поиск сравнивает только записи одной модели с запросом,
+ * посчитанным ею же.
+ *
+ * У записей, сделанных до появления этого поля, модель считается первой
+ * в цепочке: других тогда и не было.
+ */
 interface StoredRecord extends IndexedMessage {
   vec: string;
+  model?: string;
 }
 
 /** Найденное: реплика и насколько близко по смыслу (0…1). */
@@ -110,15 +124,24 @@ const RETRYABLE = new Set(['quota', 'not-found', 'server']);
  * а строка поиска — запрос. Пара «документ/запрос» заметно точнее, чем
  * если считать обе стороны одинаково.
  */
-async function embed(texts: string[], taskType: 'RETRIEVAL_DOCUMENT' | 'RETRIEVAL_QUERY'): Promise<number[][]> {
+async function embed(
+  texts: string[],
+  taskType: 'RETRIEVAL_DOCUMENT' | 'RETRIEVAL_QUERY',
+  only?: string,
+): Promise<{ vectors: number[][]; model: string }> {
   const skipped: string[] = [];
   let lastError: ProviderRequestError | undefined;
 
-  for (const model of config.search.chain) {
+  for (const model of only ? [only] : config.search.chain) {
     try {
       const response = await getClient().models.embedContent({
         model,
-        contents: texts,
+        // Каждый текст — отдельный Content, а не строка в массиве. Разница
+        // не косметическая: gemini-embedding-2 от массива строк склеивает
+        // все реплики в ОДИН вектор (у неё мультимодальная семантика, и части
+        // одного Content — это части одного объекта). Замерено: три текста
+        // строками дают один вектор, они же как Content — три.
+        contents: texts.map((text) => ({ role: 'user', parts: [{ text }] })),
         config: { taskType, outputDimensionality: config.search.dimensions },
       });
 
@@ -130,7 +153,7 @@ async function embed(texts: string[], taskType: 'RETRIEVAL_DOCUMENT' | 'RETRIEVA
       }
 
       if (skipped.length > 0) logger.info('Эмбеддинги посчитала запасная модель', { model, skipped });
-      return vectors;
+      return { vectors, model };
     } catch (error) {
       const failure = error instanceof ProviderRequestError ? error : translateGeminiError(PROVIDER_ID, model, error);
       if (!RETRYABLE.has(failure.kind)) throw failure;
@@ -189,13 +212,15 @@ async function flush(key: string): Promise<void> {
   pending.delete(key);
 
   try {
-    const vectors = await embed(
+    const { vectors, model } = await embed(
       queue.map((message) => message.text),
       'RETRIEVAL_DOCUMENT',
     );
 
     const lines = queue
-      .map((message, index) => JSON.stringify({ ...message, vec: encodeVector(vectors[index] ?? []) } as StoredRecord))
+      .map((message, index) =>
+        JSON.stringify({ ...message, vec: encodeVector(vectors[index] ?? []), model } as StoredRecord),
+      )
       .join('\n');
 
     await mkdir(config.search.dir, { recursive: true });
@@ -235,27 +260,60 @@ export async function searchMessages(key: string, query: string): Promise<Search
     throw error;
   }
 
-  const [queryVector] = await embed([query], 'RETRIEVAL_QUERY');
-  if (!queryVector) return [];
-  const needle = new Float32Array(queryVector);
-
-  const hits: SearchHit[] = [];
+  // Разбираем архив по моделям: сравнивать вектор одной с вектором другой
+  // бессмысленно, а в файле они могут соседствовать — например, если первая
+  // модель однажды упёрлась в дневную норму и пачку досчитала запасная.
+  const byModel = new Map<string, StoredRecord[]>();
 
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
     try {
       const record = JSON.parse(line) as StoredRecord;
-      const score = cosine(needle, decodeVector(record.vec));
-      hits.push({ ts: record.ts, who: record.who, text: record.text, messageId: record.messageId, score });
+      // Записи без поля model сделаны до его появления — тогда работала
+      // только первая модель цепочки.
+      const model = record.model ?? config.search.chain[0] ?? '';
+      const group = byModel.get(model) ?? [];
+      group.push(record);
+      byModel.set(model, group);
     } catch {
       // Битая строка — обрыв записи при остановке процесса. Пропускаем.
+    }
+  }
+
+  const hits: SearchHit[] = [];
+
+  // Запрос считаем каждой моделью, чьи записи есть в архиве. Обычно она одна,
+  // так что это один запрос; после смены модели какое-то время будет два.
+  for (const [model, records] of byModel) {
+    let needle: Float32Array;
+    try {
+      const { vectors } = await embed([query], 'RETRIEVAL_QUERY', model);
+      if (!vectors[0]) continue;
+      needle = new Float32Array(vectors[0]);
+    } catch (error) {
+      // Модель, которой считали старые записи, могла исчезнуть. Это не повод
+      // терять весь поиск: ищем по тому, что ещё считается.
+      logger.warn('Не удалось посчитать запрос этой моделью, пропускаю её записи', {
+        model,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
+
+    // Порог у каждой модели свой: замерено, что у gemini-embedding-2
+    // абсолютные оценки заметно ниже, и общий порог отсекал бы верные находки.
+    const floor = config.search.minScoreByModel[model] ?? config.search.minScore;
+
+    for (const record of records) {
+      const score = cosine(needle, decodeVector(record.vec));
+      if (score >= floor) {
+        hits.push({ ts: record.ts, who: record.who, text: record.text, messageId: record.messageId, score });
+      }
     }
   }
 
   const ranked = hits.sort((a, b) => b.score - a.score);
   const best = ranked[0]?.score ?? 0;
 
-  return ranked
-    .filter((hit) => hit.score >= config.search.minScore && hit.score >= best - config.search.scoreGap)
-    .slice(0, config.search.topK);
+  return ranked.filter((hit) => hit.score >= best - config.search.scoreGap).slice(0, config.search.topK);
 }
