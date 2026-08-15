@@ -280,6 +280,31 @@ function extractPrompt(ctx: BotContext, args: string): string {
  * моделей небольшая, поэтому переключение всегда явное.
  */
 async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
+  const trimmed = rawPrompt.trim();
+
+  /**
+   * Реплай на фотографию. Картинки в этом сообщении нет — она в том, на которое
+   * ответили, — поэтому обработчик снимков сюда не добирается, и выкачивать её
+   * приходится отдельно.
+   *
+   * Ветка забирает и пустой запрос («/гем» реплаем на фото — «что тут?»),
+   * и «!где» с рамками, и любой вопрос про снимок. А вот «!нарисуй», «!скажи»,
+   * «!найди» и «!контекст» пропускает дальше: они про своё, и то, что рядом
+   * оказалась фотография, ничего в них не меняет.
+   */
+  const repliedPhoto = pickPhotoFileId(ctx.message?.reply_to_message?.photo ?? []);
+  const ownsPhoto =
+    repliedPhoto &&
+    !DRAW_PREFIX.test(trimmed) &&
+    !SPEAK_PREFIX.test(trimmed) &&
+    !SEARCH_PREFIX.test(trimmed) &&
+    !CONTEXT_PREFIX.test(trimmed);
+
+  if (repliedPhoto && ownsPhoto) {
+    await handleRepliedPhoto(ctx, repliedPhoto, rawPrompt);
+    return;
+  }
+
   if (!rawPrompt) {
     await ctx.reply(
       'Напишите запрос после команды. Например:\n' +
@@ -289,8 +314,19 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
         '<code>/гем !нарисуй кота-космонавта</code> — картинка вместо текста\n' +
         '<code>/гем !скажи привет</code> — ответ голосом\n' +
         '<code>/гем !найди где обсуждали деплой</code> — поиск по переписке\n\n' +
-        'Ещё можно ответить командой <code>/гем</code> на любое сообщение — я возьму его текст.',
+        'Ещё можно ответить командой <code>/гем</code> на любое сообщение — я возьму его текст, ' +
+        'а если это фотография, разберу её.',
       { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
+  // «!где» без снимка объяснить нечем: показывать не на чем. Молча отвечать
+  // текстом было бы хуже всего — человек решит, что рамки сломались.
+  if (!repliedPhoto && WHERE_PREFIX.test(trimmed)) {
+    await ctx.reply(
+      '«!где» работает по фотографии: пришлите её с такой подписью ' +
+        'либо ответьте этой командой на уже отправленный снимок.',
     );
     return;
   }
@@ -454,13 +490,22 @@ function trimForSpeech(text: string, limit: number): { text: string; trimmed: bo
  * человек как раз его и хочет послушать, а переписывать его руками глупо.
  */
 async function handleSpeak(ctx: BotContext, request: string): Promise<void> {
+  // Что озвучивать, по убыванию определённости:
+  //   1. текст после «!скажи» — сказано прямо, спорить не о чем;
+  //   2. сообщение, на которое ответили реплаем, — показано пальцем.
+  //      Причём любое, не только своё: попросить озвучить чужую реплику
+  //      так же естественно, как свою;
+  //   3. последний ответ бота в разделе — «прочитай, что ты там написал».
+  const replyTo = ctx.message?.reply_to_message;
+  const quoted = (replyTo?.text ?? replyTo?.caption ?? '').trim();
   const lastAnswer = [...ctx.session.history].reverse().find((message) => message.role === 'assistant')?.text;
-  const source = request || lastAnswer || '';
+  const source = request || quoted || lastAnswer || '';
 
   if (!source) {
     await ctx.reply(
-      'Напишите, что произнести:\n<code>/гем скажи привет, коллеги</code>\n\n' +
-        'Если текст не указывать, я озвучу свой последний ответ — но в этом разделе я ещё ничего не отвечал.',
+      'Напишите, что произнести:\n<code>/гем !скажи привет, коллеги</code>\n\n' +
+        'Или ответьте этой командой на сообщение — озвучу его. Без того и другого ' +
+        'я читаю свой последний ответ, но в этом разделе я ещё ничего не отвечал.',
       { parse_mode: 'HTML' },
     );
     return;
@@ -517,6 +562,39 @@ function resolveImageRequest(ctx: BotContext, caption: string): { prompt: string
   // С командой берём остаток подписи, без команды — всю подпись целиком.
   const asked = (match ? (match[2] ?? '') : caption).trim();
   return { prompt: asked || DEFAULT_IMAGE_PROMPT };
+}
+
+/**
+ * Команда реплаем на чужую (или свою) фотографию: «/гем !где здесь клапан»,
+ * «/гем что тут написано».
+ *
+ * Отдельная ветка нужна из-за того, как устроен Telegram: в таком сообщении
+ * самой картинки нет, есть только ссылка на неё в reply_to_message. Обработчик
+ * снимков ждёт фото в текущем сообщении и потому не срабатывал вовсе, а запрос
+ * уходил в модель голым текстом — она честно отвечала словами про несуществующий
+ * снимок. Поэтому картинку выкачиваем отсюда сами.
+ */
+async function handleRepliedPhoto(ctx: BotContext, fileId: string, rawPrompt: string): Promise<void> {
+  const gemini = findTextProvider(GEMINI_ID);
+  if (!gemini?.isConfigured) {
+    await ctx.reply('🔌 Gemini не подключён — разбирать картинки некому.');
+    return;
+  }
+
+  try {
+    const image = await withChatAction(ctx, 'typing', () => downloadAttachment(ctx, fileId));
+
+    const where = WHERE_PREFIX.exec(rawPrompt.trim());
+    if (where && image.mimeType === 'image/jpeg') {
+      await handlePointing(ctx, image, (where[1] ?? '').trim());
+      return;
+    }
+
+    const prompt = rawPrompt.trim() || DEFAULT_IMAGE_PROMPT;
+    await askChain(ctx, gemini, resolveChain(ctx.session.chainId).models, prompt, [image]);
+  } catch (error) {
+    await replyWithError(ctx, error);
+  }
 }
 
 /**
