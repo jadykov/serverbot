@@ -688,17 +688,26 @@ async function handlePhotos(ctx: BotContext, fileIds: string[], caption: string)
 
 export function registerAiCommands(bot: Bot<BotContext>): void {
   // ------------------------------------------------------- /gem и /гем
-  bot.command('gem', async (ctx) => {
+  bot.command('gem', async (ctx, next) => {
+    // Команда в подписи к фотографии — не наше дело: снимок разбирает
+    // обработчик ниже, он умеет и рамки, и склейку альбомов. Пропускаем
+    // ход, иначе подпись «/гем !где каша» отвечала бы текстом.
+    if (ctx.message?.photo) return next();
+
     await handleGemini(ctx, extractPrompt(ctx, ctx.match));
   });
 
-  bot.hears(CYRILLIC_GEM, async (ctx) => {
+  bot.hears(CYRILLIC_GEM, async (ctx, next) => {
     // ctx.match для регулярки — результат exec; для строкового триггера это string.
     const match = typeof ctx.match === 'string' ? null : ctx.match;
     const addressee = match?.[1];
 
     // В группе может быть несколько ботов: /гем@другой_бот — не наше дело.
     if (addressee && addressee.toLowerCase() !== ctx.me.username.toLowerCase()) return;
+
+    // hears в grammY срабатывает и на подпись к фотографии — отдаём её
+    // обработчику снимков по той же причине, что и латинскую форму команды.
+    if (ctx.message?.photo) return next();
 
     await handleGemini(ctx, extractPrompt(ctx, match?.[2] ?? ''));
   });
