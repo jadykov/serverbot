@@ -55,6 +55,7 @@ import { listVoiceNames, parseVoiceRequest, synthesizeSpeech } from '../services
 import { rememberMessage, searchMessages } from '../services/search-index.js';
 import { BOX_COLORS, drawBoxes, findObjects } from '../services/pointing.js';
 import { prepareDocument } from '../services/documents.js';
+import { prepareVoice } from '../services/voice.js';
 import { handleFile, sendAnswerAsFile, takeAnswerFormat, type AnswerFormat } from './file.js';
 import { MAIN_CHAIN, resolveChain, THINK_CHAIN, VOICE_CHAIN, type ChainInfo } from '../models.js';
 import {
@@ -1015,7 +1016,8 @@ function formatDuration(seconds: number): string {
  * отдельная норма в десяток запросов на модель в сутки.
  *
  * Цепочка своя, голосовая: в основной первой стоит Gemma, а она звука не
- * слышит (см. config.gemini.chains.voice).
+ * слышит (см. config.gemini.chains.voice). А сама запись перед отправкой
+ * проходит через prepareVoice — это про формат, см. src/services/voice.ts.
  *
  * В историю раздела попадает только пометка о том, что голосовое было, и
  * ответ бота. Само сказанное там не сохраняется — как и содержимое снимков.
@@ -1029,13 +1031,17 @@ async function handleVoice(ctx: BotContext, voice: VoiceMessage, question: strin
 
   try {
     // mime_type у голосовых Telegram присылает сам — обычно audio/ogg.
-    const audio = await withChatAction(ctx, 'typing', () =>
-      downloadAttachment(ctx, voice.file_id, voice.mime_type ?? 'audio/ogg'),
+    // prepareVoice приводит запись к формату, который Google принимает
+    // наверняка: OGG у Telegram всегда с кодеком Opus, а Google документирует
+    // Vorbis (см. src/services/voice.ts).
+    const audio = await withChatAction(ctx, 'typing', async () =>
+      prepareVoice(await downloadAttachment(ctx, voice.file_id, voice.mime_type ?? 'audio/ogg')),
     );
 
     logger.info('Разбираю голосовое', {
       length,
       kb: Math.round(audio.data.length / 1024),
+      mime: audio.mimeType,
       asked: question || '(без вопроса)',
     });
 

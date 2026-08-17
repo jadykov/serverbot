@@ -18,11 +18,11 @@
  * Зависимость необязательная намеренно: тянуть в образ 80 мегабайт ради
  * внешнего вида сообщения — плохая сделка, а работает бот и без неё.
  */
-import { spawn, spawnSync } from 'node:child_process';
 import { GoogleGenAI } from '@google/genai';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { withTimeout } from '../utils.js';
+import { hasFfmpeg, runFfmpeg } from './ffmpeg.js';
 import { translateGeminiError } from './gemini.js';
 import { ProviderRequestError } from '../types.js';
 
@@ -117,21 +117,6 @@ function getClient(): GoogleGenAI {
   return client;
 }
 
-/** Есть ли в системе ffmpeg. Проверяем один раз: ответ за время работы не меняется. */
-let ffmpegAvailable: boolean | null = null;
-
-function hasFfmpeg(): boolean {
-  if (ffmpegAvailable === null) {
-    ffmpegAvailable = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' }).status === 0;
-    logger.info(
-      ffmpegAvailable
-        ? 'ffmpeg найден: озвучка пойдёт голосовыми сообщениями'
-        : 'ffmpeg не найден: озвучка пойдёт аудиофайлом (WAV). Для голосовых установите ffmpeg',
-    );
-  }
-  return ffmpegAvailable;
-}
-
 /**
  * Заворачивает сырой PCM в WAV, дописывая 44-байтовый заголовок RIFF.
  *
@@ -161,10 +146,8 @@ function pcmToWav(pcm: Buffer): Buffer {
 
 /** Перекодирует PCM в OGG/Opus через ffmpeg. */
 function pcmToOpus(pcm: Buffer): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const ffmpeg = spawn('ffmpeg', [
-      '-hide_banner',
-      '-loglevel', 'error',
+  return runFfmpeg(
+    [
       // Вход — сырой поток, поэтому формат приходится описывать руками.
       '-f', 's16le',
       '-ar', String(SAMPLE_RATE),
@@ -174,21 +157,10 @@ function pcmToOpus(pcm: Buffer): Promise<Buffer> {
       '-b:a', '32k',
       '-f', 'ogg',
       'pipe:1',
-    ]);
-
-    const chunks: Buffer[] = [];
-    let stderr = '';
-
-    ffmpeg.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
-    ffmpeg.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
-    ffmpeg.on('error', reject);
-    ffmpeg.on('close', (code) => {
-      if (code === 0 && chunks.length > 0) resolve(Buffer.concat(chunks));
-      else reject(new Error(`ffmpeg завершился с кодом ${code}: ${stderr.slice(0, 200)}`));
-    });
-
-    ffmpeg.stdin.end(pcm);
-  });
+    ],
+    pcm,
+    'PCM → OGG/Opus',
+  );
 }
 
 /** Один запрос к одной модели. Возвращает сырой PCM. */
