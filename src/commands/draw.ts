@@ -12,6 +12,11 @@
  * только по явному нажатию «Рисовать», и промпт уходит с creativity=raw —
  * договорились об одном, значит рисуем именно это.
  *
+ * Там же, на экране подтверждения, выбирается форма картинки: набор кнопок
+ * из тех пропорций, которые понимает модель. Свободного ввода нет намеренно —
+ * «3:4» Krea не знает, и узнать об этом человек мог бы только по ошибке
+ * вместо картинки.
+ *
  * Черновик лежит в сессии раздела, но по одному на человека: в общем топике
  * рисовать могут двое сразу, и чужую кнопку нажать нельзя.
  */
@@ -58,7 +63,14 @@ function drafts(ctx: BotContext): Record<string, DrawDraft> {
 
 function getDraft(ctx: BotContext): DrawDraft | undefined {
   const userId = ctx.from?.id;
-  return userId === undefined ? undefined : drafts(ctx)[String(userId)];
+  const draft = userId === undefined ? undefined : drafts(ctx)[String(userId)];
+
+  // Черновики лежат в файле сессий и переживают перезапуск, в том числе
+  // с новой версией бота: у заведённых до появления выбора формы поля нет
+  // вовсе, и без этой строчки человек увидел бы «Форма: undefined».
+  if (draft && !draft.aspectRatio) draft.aspectRatio = config.openrouter.image.aspectRatio;
+
+  return draft;
 }
 
 function setDraft(ctx: BotContext, draft: DrawDraft): void {
@@ -72,6 +84,23 @@ function clearDraft(ctx: BotContext): void {
   if (userId !== undefined) delete drafts(ctx)[String(userId)];
 }
 
+/**
+ * Формы для кнопок. Это список из окружения плюс, если его туда забыли
+ * положить, само умолчание: иначе выбранная форма осталась бы без кнопки
+ * и человек не смог бы к ней вернуться, случайно нажав соседнюю.
+ */
+function ratioChoices(): string[] {
+  const { aspectRatio, aspectRatios } = config.openrouter.image;
+  return aspectRatios.includes(aspectRatio) ? aspectRatios : [aspectRatio, ...aspectRatios];
+}
+
+/** Словами то же, что и цифрами: «4:5» человеку читается хуже, чем «портрет». */
+function ratioShape(ratio: string): string {
+  const [width, height] = ratio.split(':').map(Number);
+  if (!width || !height || width === height) return 'квадрат';
+  return width > height ? 'ландшафт' : 'портрет';
+}
+
 /** Клавиатура одного вопроса: варианты ответа плюс «рисуй как есть». */
 function questionKeyboard(step: number, options: string[]): InlineKeyboard {
   const keyboard = new InlineKeyboard();
@@ -81,9 +110,23 @@ function questionKeyboard(step: number, options: string[]): InlineKeyboard {
   return keyboard.text('⏩ Рисуй как есть', `${CB}:skip`);
 }
 
-/** Клавиатура подтверждения — единственное место, где тратятся деньги. */
-function confirmKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
+/**
+ * Клавиатура подтверждения — единственное место, где тратятся деньги.
+ *
+ * Формы идут первыми и по четыре в ряд: их семь, в одну строку они
+ * не помещаются, а «Рисовать» стоит ниже, чтобы палец шёл сверху вниз
+ * от выбора к трате, а не наоборот.
+ */
+function confirmKeyboard(draft: DrawDraft): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  const choices = ratioChoices();
+
+  choices.forEach((ratio, index) => {
+    keyboard.text(ratio === draft.aspectRatio ? `✅ ${ratio}` : ratio, `${CB}:r:${index}`);
+    if (index % 4 === 3 || index === choices.length - 1) keyboard.row();
+  });
+
+  return keyboard
     .text('🎨 Рисовать', `${CB}:go`)
     .row()
     .text('✏️ Поправить', `${CB}:edit`)
@@ -115,6 +158,7 @@ async function confirmText(ctx: BotContext, draft: DrawDraft): Promise<string> {
     escapeHtml(draft.summary),
     '',
     `<i>Промпт: ${escapeHtml(draft.prompt)}</i>`,
+    `<i>Форма: ${escapeHtml(draft.aspectRatio)} — ${ratioShape(draft.aspectRatio)}</i>`,
     `<i>Примерно $0,015${left}</i>`,
   ].join('\n');
 }
@@ -122,7 +166,7 @@ async function confirmText(ctx: BotContext, draft: DrawDraft): Promise<string> {
 /** Показывает подтверждение: новым сообщением или заменой прежнего. */
 async function showConfirm(ctx: BotContext, draft: DrawDraft): Promise<void> {
   const text = await confirmText(ctx, draft);
-  const options = { parse_mode: 'HTML' as const, reply_markup: confirmKeyboard() };
+  const options = { parse_mode: 'HTML' as const, reply_markup: confirmKeyboard(draft) };
 
   if (ctx.callbackQuery) await ctx.editMessageText(text, options);
   else await ctx.reply(text, options);
@@ -195,6 +239,7 @@ function emptyDraft(request: string): DrawDraft {
     step: 0,
     awaitingEdit: false,
     refined: false,
+    aspectRatio: config.openrouter.image.aspectRatio,
     updatedAt: Date.now(),
   };
 }
@@ -226,7 +271,9 @@ async function generate(ctx: BotContext, draft: DrawDraft): Promise<void> {
     // есть» держится как раз на дорисовке моделью, там оставляем medium.
     const creativity = draft.refined ? config.openrouter.image.creativityRefined : config.openrouter.image.creativityRaw;
 
-    const image = await withChatAction(ctx, 'upload_photo', () => provider.generateImage(draft.prompt, { creativity }));
+    const image = await withChatAction(ctx, 'upload_photo', () =>
+      provider.generateImage(draft.prompt, { creativity, aspectRatio: draft.aspectRatio }),
+    );
 
     const extension = image.mimeType === 'image/jpeg' ? 'jpg' : 'png';
     const price = image.costUsd !== undefined ? `, $${image.costUsd.toFixed(4)}` : '';
@@ -313,6 +360,36 @@ export function registerDrawCommands(bot: Bot<BotContext>): void {
     draft.refined = false;
     draft.prompt = draft.original;
     draft.summary = draft.original;
+    setDraft(ctx, draft);
+    await showConfirm(ctx, draft);
+  });
+
+  // Выбор формы. Ничего не тратит: меняет черновик и перерисовывает тот же экран.
+  bot.callbackQuery(new RegExp(`^${CB}:r:(\\d+)$`), async (ctx) => {
+    const draft = getDraft(ctx);
+    if (!draft) {
+      await ctx.answerCallbackQuery({ text: 'Этот черновик уже не действует — начните заново.', show_alert: true });
+      return;
+    }
+
+    const [, indexRaw] = ctx.match as RegExpMatchArray;
+    const ratio = ratioChoices()[Number(indexRaw)];
+
+    if (ratio === undefined) {
+      await ctx.answerCallbackQuery({ text: 'Кнопка устарела.', show_alert: true });
+      return;
+    }
+
+    // Нажали на уже выбранную форму: править сообщение нечем, а Телеграм
+    // на правку без изменений отвечает ошибкой.
+    if (ratio === draft.aspectRatio) {
+      await ctx.answerCallbackQuery({ text: `Уже ${ratio}` });
+      return;
+    }
+
+    await ctx.answerCallbackQuery({ text: `${ratio} — ${ratioShape(ratio)}` });
+
+    draft.aspectRatio = ratio;
     setDraft(ctx, draft);
     await showConfirm(ctx, draft);
   });

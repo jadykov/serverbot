@@ -60,10 +60,14 @@ export class OpenRouterImageProvider implements ImageProvider {
     }
 
     const { model, quality, format, resolution, providerSlug } = config.openrouter.image;
+    // Порядок такой: сказанное прямо, потом выведенное из пикселей, потом
+    // умолчание. Форму выбирают кнопкой перед рисованием (см. commands/draw.ts),
+    // и этот выбор не должен перебиваться ничем.
     const aspectRatio =
-      options.width && options.height
+      options.aspectRatio ??
+      (options.width && options.height
         ? pickAspectRatio(options.width, options.height)
-        : config.openrouter.image.aspectRatio;
+        : config.openrouter.image.aspectRatio);
 
     // Обязательны только модель, промпт и пропорция — их понимают все модели.
     // Остальное уходит, только если задано явно: наборы параметров у моделей

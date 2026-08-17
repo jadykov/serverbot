@@ -59,6 +59,11 @@ export interface DrawDraft {
   awaitingEdit: boolean;
   /** Прошёл ли запрос через уточнения: от этого зависит creativity у Krea. */
   refined: boolean;
+  /**
+   * Выбранная форма картинки. Заводится со значением по умолчанию, дальше
+   * человек меняет её кнопками на экране подтверждения.
+   */
+  aspectRatio: string;
   /** Когда черновик трогали последний раз, мс. Протухшие выбрасываем. */
   updatedAt: number;
 }
@@ -122,6 +127,12 @@ export interface TextProvider extends BaseProvider {
 export interface ImageGenerationOptions {
   width?: number;
   height?: number;
+  /**
+   * Форма картинки из числа тех, что понимает модель («4:5», «16:9»).
+   * Задана — уходит в запрос как есть; не задана — форму выводят из width
+   * и height, а если нет и их, берётся умолчание из окружения.
+   */
+  aspectRatio?: string;
   /** Что НЕ должно попасть на картинку. */
   negativePrompt?: string;
   /**
