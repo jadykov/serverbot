@@ -15,7 +15,8 @@
  *   /гем !скажи <текст>       — ответ голосом;
  *   /гем !найди <что искать>  — поиск по переписке раздела;
  *   /гем !файл <что сделать>  — ответ отдельным файлом;
- *   /гем !где здесь <предмет> — рамка поверх фотографии.
+ *   /гем !где здесь <предмет> — рамка поверх фотографии;
+ *   /гем !личка (реплаем)    — переслать сообщение в личный диалог.
  *
  * Слова-переключатели существуют только по-русски. Латинские формы (!draw,
  * !say, !context, !find) убраны: две записи одного и того же приходилось
@@ -112,6 +113,21 @@ const SPEAK_PREFIX = switchWord('скажи');
  * Реплаем и без запроса выгружает в файл то сообщение, на которое ответили.
  */
 const FILE_PREFIX = switchWord('файл');
+
+/**
+ * Шестое слово-переключатель: «/гем !личка» реплаем — переслать сообщение
+ * в личный диалог с ботом.
+ *
+ * Зачем: длинный файл или разбор удобнее забрать к себе, а не листать
+ * в общем топике. Нейросеть тут ни при чём — пересылка целиком умение бота,
+ * поэтому на просьбу «отправь мне это в личку», сказанную словами, модель
+ * честно отвечает, что не может (см. NO_TOOLS_RULES в services/gemini.ts).
+ *
+ * Ограничение Telegram: бот не вправе написать первым. Пока человек не открыл
+ * с ним личный диалог и не нажал «Запустить», API отвечает 403 — на этот
+ * случай в топик уходит ссылка на бота.
+ */
+const DM_PREFIX = switchWord('личка|лс');
 
 /**
  * Четвёртое слово-переключатель: «/гем !найди ...» — поиск по переписке
@@ -373,6 +389,14 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
    * «!найди» и «!контекст» пропускает дальше: они про своё, и то, что рядом
    * оказалась фотография, ничего в них не меняет.
    */
+  // «!личка» проверяем первой: она про доставку уже готового сообщения,
+  // и что там внутри — файл, снимок или текст — совершенно неважно. Иначе
+  // реплай на документ утащил бы handleDocument, а на фото — разбор снимка.
+  if (DM_PREFIX.test(trimmed)) {
+    await handleSendToDm(ctx);
+    return;
+  }
+
   const repliedDocument = ctx.message?.reply_to_message?.document;
   if (repliedDocument && !FILE_PREFIX.test(trimmed)) {
     await handleDocument(ctx, repliedDocument.file_id, repliedDocument.file_name ?? 'файл', `/гем ${rawPrompt}`);
@@ -590,6 +614,60 @@ function trimForSpeech(text: string, limit: number): { text: string; trimmed: bo
   const lastStop = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '), cut.lastIndexOf('\n'));
 
   return { text: lastStop > limit / 3 ? cut.slice(0, lastStop + 1) : cut, trimmed: true };
+}
+
+/**
+ * «/гем !личка» реплаем — копия сообщения уезжает в личный диалог с ботом.
+ *
+ * Копируем, а не пересылаем: forward тащит за собой шапку «переслано из…»
+ * и ссылку на закрытую группу, которая у получателя всё равно не откроется.
+ * copyMessage делает самостоятельную копию — с файлом, подписью и разметкой,
+ * но без хвоста. Файл при этом не перезаливается: Telegram копирует его
+ * у себя, поэтому даже тяжёлый документ уходит мгновенно.
+ */
+async function handleSendToDm(ctx: BotContext): Promise<void> {
+  const userId = ctx.from?.id;
+  const chat = ctx.chat;
+  const target = ctx.message?.reply_to_message;
+
+  if (!userId || !chat) return;
+
+  if (chat.type === 'private') {
+    await ctx.reply('Мы и так в личном диалоге — пересылать некуда.');
+    return;
+  }
+
+  if (!target) {
+    await ctx.reply(
+      'Ответьте <code>/гем !личка</code> на сообщение, которое нужно забрать себе — ' +
+        'файл, снимок или обычный текст.',
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
+  try {
+    await ctx.api.copyMessage(userId, chat.id, target.message_id);
+    await ctx.reply('📨 Отправил вам в личные сообщения.');
+    logger.info('Сообщение скопировано в личку', { userId, from: chat.id, message: target.message_id });
+  } catch (error) {
+    // 403 — единственная осмысленная ошибка здесь: человек не открывал
+    // с ботом личный диалог, а первым бот написать не может.
+    if (error instanceof GrammyError && error.error_code === 403) {
+      const link = ctx.me?.username ? `https://t.me/${ctx.me.username}` : 'диалог с ботом';
+      await ctx.reply(
+        `Сначала откройте со мной личный диалог и нажмите «Запустить»: ${link}\n` +
+          'После этого повторите — перешлю.',
+        { link_preview_options: { is_disabled: true } },
+      );
+      return;
+    }
+
+    logger.warn('Не удалось скопировать сообщение в личку', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    await ctx.reply('⚠️ Не получилось переслать. Попробуйте ещё раз или сохраните файл прямо отсюда.');
+  }
 }
 
 /**
