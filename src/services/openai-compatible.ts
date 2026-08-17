@@ -53,11 +53,15 @@ export class OpenAiCompatibleProvider implements TextProvider {
     const messages: Array<{ role: string; content: unknown }> = [
       {
         role: 'system',
-        content:
+        content: [
           options.systemPrompt ??
-          'Ты — ассистент в Telegram-боте. Отвечай кратко, на языке пользователя. ' +
-            'Оформляй ответ в Markdown: **жирный**, *курсив*, `код`, блоки кода, ссылки, списки через дефис. ' +
-            'Без таблиц, вложенных списков и HTML-тегов.',
+            'Ты — ассистент в Telegram-боте. Отвечай кратко, на языке пользователя. ' +
+              'Оформляй ответ в Markdown: **жирный**, *курсив*, `код`, блоки кода, ссылки, списки через дефис. ' +
+              'Без таблиц, вложенных списков и HTML-тегов.',
+          options.extraInstruction?.trim() ?? '',
+        ]
+          .join(' ')
+          .trim(),
       },
       ...(options.history ?? []).map((message) => ({ role: message.role, content: message.text })),
       { role: 'user', content: userContent },

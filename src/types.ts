@@ -98,6 +98,14 @@ export interface TextGenerationOptions {
   history?: ChatMessage[];
   /** Системная инструкция («кто ты и как отвечаешь»). */
   systemPrompt?: string;
+  /**
+   * Правило на один запрос, дописываемое к системной инструкции.
+   *
+   * Не то же самое, что systemPrompt: тот заменяет роль целиком (его задают
+   * командой /режим), а это добавка поверх — «уложись в одно сообщение»
+   * и подобное, что верно для конкретного вызова, а не для всего топика.
+   */
+  extraInstruction?: string;
   temperature?: number;
   maxOutputTokens?: number;
   /**

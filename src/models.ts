@@ -27,6 +27,11 @@ export interface ChainInfo {
   hint: string;
   /** Модели по порядку: первая основная, дальше резерв. */
   models: string[];
+  /**
+   * Потолок ответа в токенах. У каждой цепочки свой: он упирается не в силу
+   * модели, а в её минутную норму (см. config.gemini.maxOutput).
+   */
+  maxOutputTokens: number;
 }
 
 /** Все цепочки. Порядок влияет на порядок кнопок в /режим. */
@@ -37,12 +42,14 @@ export function listChains(): ChainInfo[] {
       title: 'Обычный',
       hint: 'Разговор, вопросы, картинки, документы. Запас практически бесконечный.',
       models: config.gemini.chains.main,
+      maxOutputTokens: config.gemini.maxOutput.main,
     },
     {
       id: THINK_CHAIN,
       title: 'Подумать',
       hint: 'Сложные задачи и код. Дневная норма небольшая — примерно 10 запросов на человека.',
       models: config.gemini.chains.think,
+      maxOutputTokens: config.gemini.maxOutput.think,
     },
   ];
 }

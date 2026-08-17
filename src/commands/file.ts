@@ -19,7 +19,7 @@
 import { InputFile } from 'grammy';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
-import { escapeHtml } from '../format.js';
+import { escapeHtml, markdownToHtmlPage, markdownToPlainText } from '../format.js';
 import { withChatAction, sessionKey } from '../utils.js';
 import { findTextProvider } from '../services/registry.js';
 import { generateWithChain } from '../services/chain.js';
@@ -127,6 +127,59 @@ async function sendFile(ctx: BotContext, content: string, fileName: string, capt
   if (key) rememberMessage(key, { ts: Date.now(), who: 'бот', text: `${caption} (файл ${fileName})` });
 
   logger.info('Файл отправлен', { fileName, kb: Math.round(data.length / 1024) });
+}
+
+/**
+ * Форматы, в которых можно получить **обычный** ответ файлом:
+ * «/гем !контекст md почему падает сборка».
+ *
+ * Набор нарочно куда уже, чем FORMATS выше. Там первое слово запроса —
+ * это заказ на содержимое («!файл csv выгрузка продаж»), и слова вроде sql
+ * или py осмысленны. Здесь же ответ уже написан как ответ, и его остаётся
+ * только упаковать: разметкой (.md), простым текстом (.txt) или страницей
+ * (.html). Заодно короткий список не даёт съесть вопрос, который случайно
+ * начался с трёхбуквенного слова: «!контекст sql висит на большой таблице»
+ * останется вопросом про SQL, а не станет файлом sql.
+ */
+const ANSWER_FORMATS = ['md', 'txt', 'html'] as const;
+export type AnswerFormat = (typeof ANSWER_FORMATS)[number];
+
+/** Первое слово запроса, если это формат ответа-файла. Иначе формата нет. */
+export function takeAnswerFormat(request: string): { format?: AnswerFormat; rest: string } {
+  const match = /^\.?(md|markdown|txt|text|html)\b[\s,:.—–-]*([\s\S]*)$/i.exec(request.trim());
+  const key = match?.[1]?.toLowerCase();
+  if (!key) return { rest: request.trim() };
+
+  const format: AnswerFormat = key.startsWith('md') || key === 'markdown' ? 'md' : key === 'html' ? 'html' : 'txt';
+  return { format, rest: (match?.[2] ?? '').trim() };
+}
+
+/**
+ * Упаковывает готовый ответ модели в файл и отправляет его.
+ *
+ * Модель об этом не знает и писать ничего заново не будет: ответ уже получен
+ * обычным путём, со всей историей раздела и своим промптом. Здесь он только
+ * перекладывается в файл — потому и разметку снимает не модель, а мы сами
+ * (см. markdownToPlainText и markdownToHtmlPage в src/format.ts).
+ *
+ * .md отдаётся как есть: модель и так пишет разметкой, а её тут не портят.
+ */
+export async function sendAnswerAsFile(
+  ctx: BotContext,
+  answer: string,
+  format: AnswerFormat,
+  question: string,
+): Promise<void> {
+  const title = question.replace(/\s+/g, ' ').trim().slice(0, 80) || 'Ответ';
+
+  const content =
+    format === 'txt'
+      ? markdownToPlainText(answer)
+      : format === 'html'
+        ? markdownToHtmlPage(answer, title)
+        : answer.trim();
+
+  await sendFile(ctx, content, makeFileName(question, format), `📄 ${escapeHtml(question.slice(0, 200))}`);
 }
 
 /**

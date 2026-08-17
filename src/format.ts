@@ -54,13 +54,15 @@ export function markdownToTelegramHtml(markdown: string): string {
   // 3. Блочные конструкции — построчно.
   text = text
     // Заголовки Markdown: Telegram их не поддерживает, делаем жирный текст.
-    .replace(/^\s{0,3}#{1,6}\s+(.+?)\s*#*$/gm, '<b>$1</b>')
+    // [^\S\n]* — «пробелы, но не перевод строки»: обычный \s* съедал бы
+    // пустую строку после заголовка, и абзац прилипал к нему вплотную.
+    .replace(/^[^\S\n]{0,3}#{1,6}[^\S\n]+(.+?)[^\S\n]*#*$/gm, '<b>$1</b>')
     // Горизонтальная линия.
-    .replace(/^\s{0,3}(?:-\s*-\s*-|\*\s*\*\s*\*|_\s*_\s*_)[-*_\s]*$/gm, '––––––––––')
+    .replace(/^[^\S\n]{0,3}(?:-[^\S\n]*-[^\S\n]*-|\*[^\S\n]*\*[^\S\n]*\*|_[^\S\n]*_[^\S\n]*_)[-*_ \t]*$/gm, '––––––––––')
     // Маркеры списка: - * + -> •  (нумерованные списки оставляем как есть).
-    .replace(/^(\s*)[-*+]\s+/gm, '$1• ')
+    .replace(/^([^\S\n]*)[-*+][^\S\n]+/gm, '$1• ')
     // Цитаты (символ > уже экранирован в &gt;).
-    .replace(/^\s{0,3}&gt;\s?(.*)$/gm, '<blockquote>$1</blockquote>');
+    .replace(/^[^\S\n]{0,3}&gt;[^\S\n]?(.*)$/gm, '<blockquote>$1</blockquote>');
 
   // Склеиваем подряд идущие строки-цитаты в одну — иначе Telegram
   // нарисует несколько отдельных цитат вместо одной.
@@ -140,4 +142,236 @@ export function splitMarkdown(markdown: string, limit = 3500): string[] {
 
   flush();
   return chunks.filter((chunk) => chunk.trim().length > 0);
+}
+
+/**
+ * Markdown -> простой текст.
+ *
+ * Нужен для ответа в .txt: разметка, которую модель пишет всегда, в текстовом
+ * файле превращается в мусор — звёздочки вокруг слов, решётки перед
+ * заголовками, обратные кавычки посреди кода. Здесь они снимаются, а сам
+ * текст остаётся нетронутым.
+ *
+ * Ссылки разворачиваются в «текст (адрес)»: иначе адрес пропал бы совсем,
+ * а в файле, который читают вне чата, это единственный способ дать ссылку.
+ */
+export function markdownToPlainText(markdown: string): string {
+  const codeFragments: string[] = [];
+
+  let text = markdown.replace(/\r\n/g, '\n');
+
+  // Код вынимаем первым — и по той же причине, что и везде: звёздочки
+  // и подчёркивания внутри примера кода не разметка, а сам код, и снимать
+  // их нельзя. Заборы ``` при этом уходят: в текстовом файле они лишние.
+  text = text.replace(/```[\w+#.-]*\n?([\s\S]*?)```/g, (_match, code: string) => {
+    codeFragments.push(code.replace(/\n$/, ''));
+    return placeholder(codeFragments.length - 1);
+  });
+  text = text.replace(/`([^`\n]+)`/g, (_match, code: string) => {
+    codeFragments.push(code);
+    return placeholder(codeFragments.length - 1);
+  });
+
+  text = text
+    .replace(/^[^\S\n]{0,3}#{1,6}[^\S\n]+(.+?)[^\S\n]*#*$/gm, '$1')
+    .replace(/^[^\S\n]{0,3}(?:-[^\S\n]*-[^\S\n]*-|\*[^\S\n]*\*[^\S\n]*\*|_[^\S\n]*_[^\S\n]*_)[-*_ \t]*$/gm, '––––––––––')
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s()]+)\)/g, '$1 ($2)')
+    .replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '$1')
+    .replace(/(?<![\w\\])__(?=\S)([\s\S]*?\S)__(?!\w)/g, '$1')
+    .replace(/~~(?=\S)([\s\S]*?\S)~~/g, '$1')
+    .replace(/(?<![*\w])\*(?=\S)([^*\n]*\S)\*(?!\*)/g, '$1')
+    .replace(/(?<![\w\\_])_(?=\S)([^_\n]*\S)_(?![\w_])/g, '$1')
+    // После снятия заборов остаются лишние пустые строки — схлопываем.
+    .replace(/\n{3,}/g, '\n\n');
+
+  // Код возвращаем на место — уже нетронутым.
+  return text.replace(new RegExp(`${MARK}(\\d+)${MARK}`, 'g'), (_match, index: string) => codeFragments[Number(index)] ?? '').trim();
+}
+
+/**
+ * Инлайновая разметка одной строки для настоящей HTML-страницы.
+ *
+ * Порядок тот же, что и в markdownToTelegramHtml, и по той же причине:
+ * код вынимается до экранирования, иначе разметка внутри примеров кода
+ * будет обработана как разметка.
+ */
+function inlineToHtml(source: string): string {
+  const code: string[] = [];
+
+  let text = source.replace(/`([^`\n]+)`/g, (_match, fragment: string) => {
+    code.push(`<code>${escapeHtml(fragment)}</code>`);
+    return placeholder(code.length - 1);
+  });
+
+  text = escapeHtml(text)
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s()]+)\)/g, '<a href="$2">$1</a>')
+    .replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '<strong>$1</strong>')
+    .replace(/(?<![\w\\])__(?=\S)([\s\S]*?\S)__(?!\w)/g, '<strong>$1</strong>')
+    .replace(/~~(?=\S)([\s\S]*?\S)~~/g, '<s>$1</s>')
+    .replace(/(?<![*\w])\*(?=\S)([^*\n]*\S)\*(?!\*)/g, '<em>$1</em>')
+    .replace(/(?<![\w\\_])_(?=\S)([^_\n]*\S)_(?![\w_])/g, '<em>$1</em>');
+
+  return text.replace(new RegExp(`${MARK}(\\d+)${MARK}`, 'g'), (_match, index: string) => code[Number(index)] ?? '');
+}
+
+/**
+ * Стили страницы. Скромные намеренно: файл читают, а не разглядывают.
+ *
+ * Всё внутри одного файла — ни шрифтов, ни библиотек снаружи: страница
+ * должна открываться с флешки и без интернета. Тёмная тема идёт следом
+ * за системной настройкой читателя, потому что выбирать её в статическом
+ * файле негде.
+ */
+const PAGE_STYLE = `
+:root { color-scheme: light dark; --fg: #1a1a1a; --bg: #ffffff; --muted: #5c5c5c; --line: #e3e3e3; --code-bg: #f5f5f5; --link: #0a58ca; }
+@media (prefers-color-scheme: dark) {
+  :root { --fg: #e8e8e8; --bg: #16181c; --muted: #a0a0a0; --line: #2f333a; --code-bg: #21252b; --link: #7aa7ff; }
+}
+* { box-sizing: border-box; }
+body { margin: 0 auto; padding: 2.5rem 1.25rem 4rem; max-width: 46rem; background: var(--bg); color: var(--fg);
+  font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+h1, h2, h3, h4, h5, h6 { line-height: 1.25; margin: 2rem 0 0.75rem; }
+h1 { font-size: 1.75rem; } h2 { font-size: 1.35rem; } h3 { font-size: 1.15rem; }
+p, ul, ol, blockquote, pre { margin: 0 0 1rem; }
+ul, ol { padding-left: 1.5rem; }
+li { margin: 0.25rem 0; }
+a { color: var(--link); }
+code { background: var(--code-bg); padding: 0.15em 0.35em; border-radius: 4px; font-size: 0.9em;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+pre { background: var(--code-bg); padding: 1rem; border-radius: 8px; overflow-x: auto; }
+pre code { background: none; padding: 0; font-size: 0.875rem; }
+blockquote { margin-left: 0; padding: 0.1rem 0 0.1rem 1rem; border-left: 3px solid var(--line); color: var(--muted); }
+hr { border: none; border-top: 1px solid var(--line); margin: 2rem 0; }
+.footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.85rem; }
+`.trim();
+
+/**
+ * Markdown -> самодостаточная HTML-страница.
+ *
+ * Не путать с markdownToTelegramHtml: тот отдаёт плоский фрагмент для чата,
+ * где нет ни заголовков, ни списков, ни таблиц. Здесь — полноценный документ,
+ * который открывается в браузере и печатается на бумагу.
+ *
+ * Разбор построчный и намеренно простой: поддержано ровно то, чем пишет
+ * модель (заголовки, списки, цитаты, блоки кода, линия), без вложенности
+ * и таблиц. Чего не поняли — уедет обычным абзацем, а не сломает страницу.
+ */
+export function markdownToHtmlPage(markdown: string, title: string): string {
+  const lines = markdown.replace(/\r\n/g, '\n').split('\n');
+  const html: string[] = [];
+
+  // Открытый список или цитата: закрываются, как только строка перестала
+  // быть их продолжением.
+  let list: 'ul' | 'ol' | null = null;
+  let quote = false;
+  let paragraph: string[] = [];
+
+  const closeParagraph = (): void => {
+    if (paragraph.length === 0) return;
+    html.push(`<p>${inlineToHtml(paragraph.join(' '))}</p>`);
+    paragraph = [];
+  };
+  const closeList = (): void => {
+    if (!list) return;
+    html.push(`</${list}>`);
+    list = null;
+  };
+  const closeQuote = (): void => {
+    if (!quote) return;
+    html.push('</blockquote>');
+    quote = false;
+  };
+  const closeAll = (): void => {
+    closeParagraph();
+    closeList();
+    closeQuote();
+  };
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!;
+
+    // Блок кода: забираем до закрывающего забора целиком, ничего не разбирая.
+    const fence = /^\s*```([\w+#.-]*)\s*$/.exec(line);
+    if (fence) {
+      closeAll();
+      const language = fence[1] ?? '';
+      const body: string[] = [];
+      index += 1;
+      while (index < lines.length && !/^\s*```\s*$/.test(lines[index]!)) {
+        body.push(lines[index]!);
+        index += 1;
+      }
+      const attribute = language ? ` class="language-${escapeHtml(language)}"` : '';
+      html.push(`<pre><code${attribute}>${escapeHtml(body.join('\n'))}</code></pre>`);
+      continue;
+    }
+
+    if (!line.trim()) {
+      closeAll();
+      continue;
+    }
+
+    const heading = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*$/.exec(line);
+    if (heading) {
+      closeAll();
+      const level = heading[1]!.length;
+      html.push(`<h${level}>${inlineToHtml(heading[2]!)}</h${level}>`);
+      continue;
+    }
+
+    if (/^\s{0,3}(?:-\s*-\s*-|\*\s*\*\s*\*|_\s*_\s*_)[-*_\s]*$/.test(line)) {
+      closeAll();
+      html.push('<hr>');
+      continue;
+    }
+
+    const quoted = /^\s{0,3}>\s?(.*)$/.exec(line);
+    if (quoted) {
+      closeParagraph();
+      closeList();
+      if (!quote) {
+        html.push('<blockquote>');
+        quote = true;
+      }
+      html.push(`<p>${inlineToHtml(quoted[1]!)}</p>`);
+      continue;
+    }
+
+    const bullet = /^\s*[-*+]\s+(.*)$/.exec(line);
+    const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+    if (bullet || numbered) {
+      closeParagraph();
+      closeQuote();
+      const kind = bullet ? 'ul' : 'ol';
+      if (list !== kind) {
+        closeList();
+        html.push(`<${kind}>`);
+        list = kind;
+      }
+      html.push(`<li>${inlineToHtml((bullet ?? numbered)![1]!)}</li>`);
+      continue;
+    }
+
+    closeList();
+    closeQuote();
+    paragraph.push(line.trim());
+  }
+
+  closeAll();
+
+  return [
+    '<!doctype html>',
+    '<html lang="ru">',
+    '<head>',
+    '<meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    `<title>${escapeHtml(title)}</title>`,
+    `<style>${PAGE_STYLE}</style>`,
+    '</head>',
+    '<body>',
+    html.join('\n'),
+    '</body>',
+    '</html>',
+    '',
+  ].join('\n');
 }

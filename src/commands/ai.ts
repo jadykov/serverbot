@@ -10,6 +10,7 @@
  * с восклицательным знаком:
  *   /гем <вопрос>             — обычный ответ цепочкой, выбранной для раздела;
  *   /гем !контекст <задача>   — сильная цепочка;
+ *   /гем !контекст md|txt|html <задача> — она же, но ответ приходит файлом;
  *   /гем !нарисуй <описание>  — картинка вместо текста;
  *   /гем !скажи <текст>       — ответ голосом;
  *   /гем !найди <что искать>  — поиск по переписке раздела;
@@ -52,8 +53,8 @@ import { synthesizeSpeech } from '../services/gemini-tts.js';
 import { rememberMessage, searchMessages } from '../services/search-index.js';
 import { BOX_COLORS, drawBoxes, findObjects } from '../services/pointing.js';
 import { prepareDocument } from '../services/documents.js';
-import { handleFile } from './file.js';
-import { resolveChain, THINK_CHAIN } from '../models.js';
+import { handleFile, sendAnswerAsFile, takeAnswerFormat, type AnswerFormat } from './file.js';
+import { resolveChain, THINK_CHAIN, type ChainInfo } from '../models.js';
 import {
   ProviderNotConfiguredError,
   ProviderRequestError,
@@ -132,6 +133,20 @@ const MEDIA_COMMAND = /^\/(?:гем|gem)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/
  */
 const FORGOTTEN_BANG = /^(?:нарисуй|контекст|скажи|найди|найти)(?:[\s,:.—–-]|$)/i;
 
+/**
+ * Добавка к инструкции для любого ответа, который идёт в чат.
+ *
+ * Модели склонны к обстоятельности, и без просьбы длинный разбор приезжает
+ * простынёй на десяток сообщений подряд, где ни прокрутить, ни найти начало.
+ * Здесь просят уложиться в одно — а кому нужен полный разбор, тот попросит
+ * файлом («!контекст md ...»), там потолок в разы выше.
+ */
+const ONE_POST_RULE = [
+  'Ответ должен уместиться в одно сообщение Telegram: не длиннее 3000 знаков.',
+  'Не обрывай мысль на полуслове — лучше короче, но законченно:',
+  'сначала главное, подробности только если остаётся место.',
+].join(' ');
+
 /** Что спросить у модели, если картинку прислали вообще без подписи. */
 const DEFAULT_IMAGE_PROMPT = 'Что на этой картинке? Опиши кратко и по делу.';
 
@@ -206,20 +221,41 @@ function takeHistory(history: ChatMessage[], limit: number): ChatMessage[] {
  * что получилось. Если ответила не первая модель, дописываем сноску — иначе
  * непонятно, почему ответ вдруг стал другого качества.
  */
-async function askChain(
-  ctx: BotContext,
-  provider: TextProvider,
-  models: string[],
-  prompt: string,
-  attachments: Attachment[] = [],
+interface AskOptions {
+  attachments?: Attachment[];
   /**
    * Что записать в историю вместо prompt. Нужно там, где к запросу подмешан
    * служебный контекст: цитата реплики, на которую человек ответил. В историю
    * она попасть не должна — бот и так помнит собственные слова, а дубли
    * съедают и место, и внимание модели.
    */
-  historyText?: string,
+  historyText?: string;
+  /**
+   * Отдать ответ файлом, а не сообщением: «/гем !контекст md ...».
+   * Тогда же берётся файловый потолок ответа — он ещё выше, чем у цепочки:
+   * файла просят как раз ради длинного разбора.
+   */
+  asFile?: AnswerFormat;
+}
+
+async function askChain(
+  ctx: BotContext,
+  provider: TextProvider,
+  /** Цепочка целиком: из неё берутся и модели, и потолок ответа. */
+  chain: ChainInfo,
+  prompt: string,
+  { attachments = [], historyText, asFile }: AskOptions = {},
 ): Promise<boolean> {
+  /**
+   * Всё, что идёт в чат, обязано уместиться в одно сообщение — и обычный
+   * вопрос, и «!контекст», и разбор фотографии, и ответ по присланной книге.
+   * Исключение ровно одно: ответ, который уезжает файлом.
+   *
+   * Три слоя, потому что одного мало: модель просят быть краткой, потолок
+   * токенов у цепочки скромный, а на выходе всё равно режем — знаки модель
+   * не считает, и обещаниям про длину верить нельзя.
+   */
+  const onePost = !asFile;
   try {
     // Историю передаём укороченной: длинный контекст = дороже и медленнее.
     const history = takeHistory(ctx.session.history, config.ai.historyLimit);
@@ -227,8 +263,17 @@ async function askChain(
     const systemPrompt = ctx.session.systemPrompt || undefined;
 
     // Пока модель думает, показываем «печатает…».
-    const answer = await withChatAction(ctx, 'typing', () =>
-      generateWithChain(provider, models, prompt, { history, attachments, systemPrompt }),
+    const answer = await withChatAction(ctx, asFile ? 'upload_document' : 'typing', () =>
+      generateWithChain(provider, chain.models, prompt, {
+        history,
+        attachments,
+        systemPrompt,
+        // Потолок ответа: у цепочки свой (он упирается в минутную норму
+        // её моделей), файловый ещё выше — файла просят ради длинного,
+        // а для ответа в одно сообщение берётся самый скромный.
+        maxOutputTokens: asFile ? config.files.answerMaxOutputTokens : chain.maxOutputTokens,
+        ...(onePost ? { extraInstruction: ONE_POST_RULE } : {}),
+      }),
     );
 
     if (config.ai.historyLimit > 0) {
@@ -246,7 +291,27 @@ async function askChain(
       ctx.session.history = ctx.session.history.slice(-config.ai.historyLimit);
     }
 
-    await sendMarkdown(ctx, answer.text);
+    if (asFile) {
+      await sendAnswerAsFile(ctx, answer.text, asFile, historyText ?? prompt);
+    } else if (onePost) {
+      // Просьба уложиться в сообщение — не гарантия: модель не считает знаки.
+      // Режем сами, тем же делителем, что и обычную отправку, — он умеет
+      // не рвать блок кода посередине. В историю при этом уходит полный
+      // ответ: обрезка касается только показа.
+      const [first = '', ...rest] = splitMarkdown(answer.text);
+      await sendMarkdown(ctx, first);
+
+      if (rest.length > 0) {
+        await ctx.reply(
+          '<i>Ответ длиннее одного сообщения и показан не целиком. ' +
+            'Чтобы получить его весь — тем же вопросом, но файлом:</i>\n' +
+            `<code>/гем !контекст md ${escapeHtml((historyText ?? prompt).slice(0, 100))}</code>`,
+          { parse_mode: 'HTML' },
+        );
+      }
+    } else {
+      await sendMarkdown(ctx, answer.text);
+    }
 
     if (answer.skipped.length > 0) {
       await ctx.reply(
@@ -386,12 +451,27 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   }
 
   const think = CONTEXT_PREFIX.exec(rawPrompt.trim());
-  const prompt = think ? (think[1] ?? '').trim() : rawPrompt;
+  const asked = think ? (think[1] ?? '').trim() : rawPrompt;
+
+  /**
+   * «!контекст md ...», «!контекст txt ...», «!контекст html ...» — тот же
+   * ответ, но файлом. Просят его ради длинных разборов: в чате такой ответ
+   * приезжает пачкой кусков по 4096 знаков, где ни прокрутить, ни сохранить.
+   *
+   * Модель об этом не предупреждают: она отвечает как обычно, со всей историей
+   * раздела, а упаковкой занимаемся мы (см. sendAnswerAsFile в ./file.ts).
+   * Тем и отличается от «!файл», где модель пишет сразу содержимое файла
+   * и никакого диалога вокруг нет.
+   */
+  const { format: fileFormat, rest } = think ? takeAnswerFormat(asked) : { format: undefined, rest: asked };
+  const prompt = fileFormat ? rest : asked;
 
   if (think && !prompt) {
     await ctx.reply(
-      'После «!контекст» нужна сама задача. Например:\n' +
-        '<code>/гем !контекст почему этот SQL висит на большой таблице</code>\n\n' +
+      (fileFormat ? `После «!контекст ${fileFormat}» нужна сама задача. Например:\n` : 'После «!контекст» нужна сама задача. Например:\n') +
+        '<code>/гем !контекст почему этот SQL висит на большой таблице</code>\n' +
+        '<code>/гем !контекст md разбор архитектуры бота</code> — ответ файлом\n\n' +
+        'Форматы файла: <code>md</code>, <code>txt</code>, <code>html</code>. ' +
         'Эти модели сильнее, но их дневная норма невелика — для обычных вопросов ' +
         'хватает просто <code>/гем</code>.',
       { parse_mode: 'HTML' },
@@ -403,7 +483,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   if (!gemini) return;
 
   const chain = think ? resolveChain(THINK_CHAIN) : resolveChain(ctx.session.chainId);
-  const answered = await askChain(ctx, gemini, chain.models, prompt);
+  const answered = await askChain(ctx, gemini, chain, prompt, { asFile: fileFormat });
 
   // Запрос начался со слова-переключателя, но без «!». Отвечаем как на обычный
   // вопрос — человек, скорее всего, его и задавал, — но подсказываем синтаксис:
@@ -620,7 +700,7 @@ async function handleRepliedPhoto(ctx: BotContext, fileId: string, rawPrompt: st
     }
 
     const prompt = rawPrompt.trim() || DEFAULT_IMAGE_PROMPT;
-    await askChain(ctx, gemini, resolveChain(ctx.session.chainId).models, prompt, [image]);
+    await askChain(ctx, gemini, resolveChain(ctx.session.chainId), prompt, { attachments: [image] });
   } catch (error) {
     await replyWithError(ctx, error);
   }
@@ -646,7 +726,7 @@ async function handleReplyToBot(ctx: BotContext, text: string, quoted: string): 
     ? `Пользователь отвечает на твою реплику:\n«${quoted.slice(0, 700)}»\n\nЕго ответ: ${text}`
     : text;
 
-  await askChain(ctx, gemini, resolveChain(ctx.session.chainId).models, prompt, [], text);
+  await askChain(ctx, gemini, resolveChain(ctx.session.chainId), prompt, { historyText: text });
 }
 
 /**
@@ -724,14 +804,10 @@ async function handleDocument(ctx: BotContext, fileId: string, fileName: string,
       )
       .catch(() => undefined);
 
-    await askChain(
-      ctx,
-      gemini,
-      resolveChain(THINK_CHAIN).models,
-      prompt,
-      prepared.attachment ? [prepared.attachment] : [],
-      `Прислал файл «${fileName}» (${prepared.tokens.toLocaleString('ru')} токенов). ${question}`,
-    );
+    await askChain(ctx, gemini, resolveChain(THINK_CHAIN), prompt, {
+      attachments: prepared.attachment ? [prepared.attachment] : [],
+      historyText: `Прислал файл «${fileName}» (${prepared.tokens.toLocaleString('ru')} токенов). ${question}`,
+    });
 
     await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
   } catch (error) {
@@ -765,7 +841,7 @@ async function handlePhotos(ctx: BotContext, fileIds: string[], caption: string)
       return;
     }
 
-    await askChain(ctx, gemini, resolveChain(ctx.session.chainId).models, request.prompt, attachments);
+    await askChain(ctx, gemini, resolveChain(ctx.session.chainId), request.prompt, { attachments });
   } catch (error) {
     await replyWithError(ctx, error);
   }

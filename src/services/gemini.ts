@@ -5,7 +5,7 @@
  * Используется официальный SDK @google/genai (пришёл на смену устаревшему
  * @google/generative-ai).
  */
-import { GoogleGenAI, ThinkingLevel, type Part, type ThinkingConfig } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, type GenerateContentResponse, type Part, type ThinkingConfig } from '@google/genai';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { withTimeout } from '../utils.js';
@@ -62,6 +62,33 @@ function extractApiError(message: string): { text: string; code?: number; status
   } catch {
     return { text: message };
   }
+}
+
+/**
+ * Достаёт из ошибки 400 предел ответа, названный самой моделью.
+ *
+ * Потолки ответа у моделей разные, а списка, которому можно доверять, нет:
+ * поколения выходят чаще, чем обновляется документация. Зато Google в отказе
+ * пишет предел прямо — «maxOutputTokens must be less than or equal to 8192».
+ * Берём число оттуда: из всех чисел в сообщении предел — наименьшее, потому
+ * что второе число (если оно есть) — это то, сколько мы попросили.
+ *
+ * Нужно это ради подстраховки: попроси мы у модели больше, чем она умеет,
+ * человек получил бы ошибку вместо ответа — 400 в цепочке не перебирается.
+ */
+export function outputLimitFromError(message: string): number | null {
+  if (!/output[_ ]?tokens/i.test(message)) return null;
+
+  // Код ошибки выкидываем сразу: в JSON от Google рядом лежит "code": 400,
+  // и без этого пределом объявлялось бы оно.
+  const text = message.replace(/"?code"?\s*[:=]\s*\d+/gi, ' ');
+
+  // Потолки ответа меньше 512 токенов не встречаются — всё, что мельче,
+  // это какие-то другие числа из сообщения.
+  const numbers = [...text.matchAll(/\b(\d{3,7})\b/g)].map((match) => Number(match[1])).filter((value) => value >= 512);
+  if (numbers.length === 0) return null;
+
+  return Math.min(...numbers);
 }
 
 /** Кто такой бот. Эту часть можно заменить своей командой /режим. */
@@ -139,8 +166,8 @@ const NO_TOOLS_RULES = [
  * с ролью терялись правила разметки: топик с собственным промптом начинал
  * отвечать таблицами и HTML, которые Telegram показать не может.
  */
-function buildSystemPrompt(custom?: string): string {
-  return [custom?.trim() || DEFAULT_ROLE, MARKUP_RULES, EMOJI_RULES, NO_TOOLS_RULES].join(' ');
+function buildSystemPrompt(custom?: string, extra?: string): string {
+  return [custom?.trim() || DEFAULT_ROLE, MARKUP_RULES, EMOJI_RULES, NO_TOOLS_RULES, extra?.trim() ?? ''].join(' ').trim();
 }
 
 export class GeminiProvider implements TextProvider {
@@ -204,15 +231,17 @@ export class GeminiProvider implements TextProvider {
     const startedAt = Date.now();
     const thinkingConfig = buildThinkingConfig();
 
-    try {
-      const response = await withTimeout(
+    const requested = options.maxOutputTokens ?? 2048;
+
+    const call = (maxOutputTokens: number): Promise<GenerateContentResponse> =>
+      withTimeout(
         this.getClient().models.generateContent({
           model,
           contents,
           config: {
-            systemInstruction: buildSystemPrompt(options.systemPrompt),
+            systemInstruction: buildSystemPrompt(options.systemPrompt, options.extraInstruction),
             temperature: options.temperature ?? 0.8,
-            maxOutputTokens: options.maxOutputTokens ?? 2048,
+            maxOutputTokens,
             // Отправляется, только если задан GEMINI_THINKING (см. выше).
             ...(thinkingConfig ? { thinkingConfig } : {}),
           },
@@ -220,6 +249,20 @@ export class GeminiProvider implements TextProvider {
         config.ai.timeoutMs,
         `Gemini (${model})`,
       );
+
+    try {
+      let response: GenerateContentResponse;
+      try {
+        response = await call(requested);
+      } catch (error) {
+        // Просили больше, чем модель умеет отдать за раз. Не беда человека:
+        // повторяем тем же ходом, но с потолком, который назвала сама модель.
+        const limit = outputLimitFromError(error instanceof Error ? error.message : String(error));
+        if (limit === null || limit >= requested) throw error;
+
+        logger.warn('Модель не приняла потолок ответа, повторяю с её собственным', { model, requested, limit });
+        response = await call(limit);
+      }
 
       const text = response.text?.trim();
 
