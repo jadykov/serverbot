@@ -873,8 +873,10 @@ async function handleTrack(ctx: BotContext, request: string): Promise<void> {
       'Опишите песню после «!трек». Например:\n' +
         '<code>/гем !трек грустная песня про дедлайны, женский вокал</code>\n' +
         '<code>/гем !трек полминуты весёлого чиптюна без вокала</code>\n\n' +
-        `Стиль и слова я соберу сам, а длительность можно назвать словами — ` +
-        `по умолчанию ${config.goapi.music.duration} с, максимум ${config.goapi.music.maxDuration} с. ` +
+        `Стиль и слова я соберу сам. Длительность можно назвать словами («секунд десять») — ` +
+        (config.goapi.music.duration === config.goapi.music.maxDuration
+          ? `по умолчанию и максимум ${config.goapi.music.duration} с. `
+          : `по умолчанию ${config.goapi.music.duration} с, максимум ${config.goapi.music.maxDuration} с. `) +
         `Это платно: ${config.trackQuota.perUserPerDay} трека в день на человека.`,
       { parse_mode: 'HTML' },
     );
