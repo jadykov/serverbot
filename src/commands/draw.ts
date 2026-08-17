@@ -21,7 +21,7 @@ import { logger } from '../logger.js';
 import { escapeHtml } from '../format.js';
 import { withChatAction } from '../utils.js';
 import { findTextProvider, resolveImageProvider } from '../services/registry.js';
-import { peekImageQuota, releaseImageSlot, reserveImageSlot } from '../services/image-quota.js';
+import { imageQuota } from '../services/daily-quota.js';
 import { composeDrawing, planDrawing, stripStableDiffusionSyntax } from '../services/krea-prompt.js';
 import type { BotContext, DrawDraft, TextProvider } from '../types.js';
 
@@ -107,7 +107,7 @@ function questionText(draft: DrawDraft): string {
 
 /** Текст подтверждения: что нарисуем, почём и сколько ещё осталось на сегодня. */
 async function confirmText(ctx: BotContext, draft: DrawDraft): Promise<string> {
-  const quota = await peekImageQuota(ctx.from?.id);
+  const quota = await imageQuota.peek(ctx.from?.id);
   const left = quota ? `\nОстанется на сегодня: ${Math.max(0, quota.limit - quota.used - 1)} из ${quota.limit}` : '';
 
   return [
@@ -207,12 +207,12 @@ function emptyDraft(request: string): DrawDraft {
  */
 async function generate(ctx: BotContext, draft: DrawDraft): Promise<void> {
   const userId = ctx.from?.id;
-  const quota = await reserveImageSlot(userId);
+  const quota = await imageQuota.reserve(userId);
 
   if (!quota.allowed) {
     await ctx.reply(
       `🚫 На сегодня картинки закончились: ${quota.limit} в день на человека — ` +
-        `рисование единственное, что стоит денег.\n\nНорма обновится через ${quota.resetsIn}. ` +
+        `картинки стоят денег.\n\nНорма обновится через ${quota.resetsIn}. ` +
         'Текстовые запросы работают как обычно.',
     );
     return;
@@ -239,7 +239,7 @@ async function generate(ctx: BotContext, draft: DrawDraft): Promise<void> {
     clearDraft(ctx);
     await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
   } catch (error) {
-    await releaseImageSlot(userId);
+    await imageQuota.release(userId);
     await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
     logger.warn('Не удалось нарисовать картинку', { error: error instanceof Error ? error.message : String(error) });
     await ctx.reply(`⚠️ ${error instanceof Error ? error.message : 'Не получилось нарисовать картинку.'}`);

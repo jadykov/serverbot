@@ -13,6 +13,7 @@
  *   /гем !контекст md|txt|html <задача> — она же, но ответ приходит файлом;
  *   /гем !нарисуй <описание>  — картинка вместо текста;
  *   /гем !скажи <текст>       — ответ голосом;
+ *   /гем !трек <описание>     — песня с вокалом (платно);
  *   /гем !найди <что искать>  — поиск по переписке раздела;
  *   /гем !файл <что сделать>  — ответ отдельным файлом;
  *   /гем !где здесь <предмет> — рамка поверх фотографии;
@@ -56,6 +57,9 @@ import { rememberMessage, searchMessages } from '../services/search-index.js';
 import { BOX_COLORS, drawBoxes, findObjects } from '../services/pointing.js';
 import { prepareDocument } from '../services/documents.js';
 import { prepareVoice } from '../services/voice.js';
+import { clampDuration, generateTrack, isMusicConfigured, MUSIC_SETUP_HINT } from '../services/goapi-music.js';
+import { isInstrumental, planSong } from '../services/song-prompt.js';
+import { trackQuota } from '../services/daily-quota.js';
 import { handleFile, sendAnswerAsFile, takeAnswerFormat, type AnswerFormat } from './file.js';
 import { MAIN_CHAIN, resolveChain, THINK_CHAIN, VOICE_CHAIN, type ChainInfo } from '../models.js';
 import {
@@ -111,6 +115,19 @@ const DRAW_PREFIX = switchWord('нарисуй');
 const SPEAK_PREFIX = switchWord('скажи');
 
 /**
+ * Восьмое слово-переключатель: «/гем !трек ...» — песня с вокалом.
+ *
+ * Второе и последнее место, где бот тратит деньги. Минута музыки у Ace-Step
+ * стоит около $0,03 — вдвое дороже картинки, — поэтому норма своя и своя же
+ * подпись с ценой (см. handleTrack и src/services/goapi-music.ts).
+ *
+ * «Песня» принята вторым написанием: слово в такой просьбе первым приходит
+ * в голову чаще, чем «трек», а спутать его с обычным вопросом восклицательный
+ * знак не даёт.
+ */
+const TRACK_PREFIX = switchWord('трек|песня');
+
+/**
  * Пятое слово-переключатель: «/гем !файл ...» — ответ отдельным файлом.
  * Реплаем и без запроса выгружает в файл то сообщение, на которое ответили.
  */
@@ -161,7 +178,7 @@ const MEDIA_COMMAND = /^\/(?:гем|gem)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/
  * а чтобы подсказать: человек, привыкший к прежнему синтаксису, иначе решит,
  * что рисование сломалось. Ответ на вопрос он при этом всё равно получит.
  */
-const FORGOTTEN_BANG = /^(?:нарисуй|контекст|скажи|найди|найти|расшифруй)(?:[\s,:.—–-]|$)/i;
+const FORGOTTEN_BANG = /^(?:нарисуй|контекст|скажи|найди|найти|расшифруй|трек|песня)(?:[\s,:.—–-]|$)/i;
 
 /**
  * Добавка к инструкции для любого ответа, который идёт в чат.
@@ -447,6 +464,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
     !FILE_PREFIX.test(trimmed) &&
     !SPEAK_PREFIX.test(trimmed) &&
     !SEARCH_PREFIX.test(trimmed) &&
+    !TRACK_PREFIX.test(trimmed) &&
     !CONTEXT_PREFIX.test(trimmed);
 
   if (repliedVoice && ownsVoice) {
@@ -468,6 +486,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
     !FILE_PREFIX.test(trimmed) &&
     !SPEAK_PREFIX.test(trimmed) &&
     !SEARCH_PREFIX.test(trimmed) &&
+    !TRACK_PREFIX.test(trimmed) &&
     !CONTEXT_PREFIX.test(trimmed);
 
   if (repliedPhoto && ownsPhoto) {
@@ -483,6 +502,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
         '<code>/гем !контекст почему этот SQL висит</code> — модель посильнее\n' +
         '<code>/гем !нарисуй кота-космонавта</code> — картинка вместо текста\n' +
         '<code>/гем !скажи привет</code> — ответ голосом\n' +
+        '<code>/гем !трек песня про дедлайны</code> — песня с вокалом\n' +
         '<code>/гем !найди где обсуждали деплой</code> — поиск по переписке\n\n' +
         'Ещё можно ответить командой <code>/гем</code> на любое сообщение — я возьму его текст, ' +
         'а если это фотография, разберу её.',
@@ -521,6 +541,12 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
     } catch (error) {
       await replyWithError(ctx, error);
     }
+    return;
+  }
+
+  const track = TRACK_PREFIX.exec(rawPrompt.trim());
+  if (track) {
+    await handleTrack(ctx, (track[1] ?? '').trim());
     return;
   }
 
@@ -812,6 +838,134 @@ async function handleSpeak(ctx: BotContext, request: string): Promise<void> {
       });
     }
   } catch (error) {
+    await replyWithError(ctx, error);
+  }
+}
+
+/**
+ * Песня с вокалом: «/гем !трек ...».
+ *
+ * Устроено в два шага, и первый из них бесплатный. Ace-Step ждёт не просьбу
+ * словами, а стиль тегами по-английски и отдельно слова песни с разметкой
+ * структуры — это собирает Gemini на лёгкой цепочке (см. services/song-prompt.ts).
+ * Только потом заказывается сам трек, и вот он стоит денег: платится секунда
+ * готового звука, минута — около трёх центов.
+ *
+ * Отсюда порядок проверок: сперва ключ, потом замысел, потом бесплатный
+ * черновик, и лишь затем дневная норма и заказ. Занимать слот нормы раньше
+ * значит списать его за неудавшийся черновик, а он не стоил ничего.
+ *
+ * Подтверждения кнопками здесь, в отличие от рисования, нет намеренно.
+ * У картинки уточняющие вопросы окупаются: пропущенный стиль или кадр видно
+ * сразу, и переделка стоит столько же, сколько попадание. У песни главное —
+ * слова, а они и так приходят человеку до трека: они показываются, пока
+ * модель пишет музыку. Спрашивать «начинать?» после того, как текст уже
+ * написан, значит удваивать шаги ради того же результата.
+ */
+async function handleTrack(ctx: BotContext, request: string): Promise<void> {
+  if (!isMusicConfigured()) {
+    await ctx.reply(`🔌 Музыка не подключена. ${MUSIC_SETUP_HINT}`);
+    return;
+  }
+
+  if (!request) {
+    await ctx.reply(
+      'Опишите песню после «!трек». Например:\n' +
+        '<code>/гем !трек грустная песня про дедлайны, женский вокал</code>\n' +
+        '<code>/гем !трек полминуты весёлого чиптюна без вокала</code>\n\n' +
+        `Стиль и слова я соберу сам, а длительность можно назвать словами — ` +
+        `по умолчанию ${config.goapi.music.duration} с, максимум ${config.goapi.music.maxDuration} с. ` +
+        `Это платно: ${config.trackQuota.perUserPerDay} трека в день на человека.`,
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
+  const gemini = await requireGemini(ctx);
+  if (!gemini) return;
+
+  // Шаг бесплатный: стиль по-английски, слова песни и длительность.
+  const plan = await withChatAction(ctx, 'typing', () => planSong(gemini, config.gemini.chains.draw, request));
+
+  if (!plan) {
+    await ctx.reply(
+      '😕 Не получилось собрать песню из этого замысла — помощник не вернул ни стиля, ни слов.\n\n' +
+        'Попробуйте сказать конкретнее: жанр, настроение, о чём поётся. ' +
+        'Денег это не стоило — трек ещё не заказывался.',
+    );
+    return;
+  }
+
+  const duration = clampDuration(plan.duration);
+  const instrumental = isInstrumental(plan);
+  const title = plan.title || request.slice(0, 60);
+
+  const userId = ctx.from?.id;
+  const quota = await trackQuota.reserve(userId);
+
+  if (!quota.allowed) {
+    await ctx.reply(
+      `🚫 На сегодня треки закончились: ${quota.limit} в день на человека — музыка стоит денег.\n\n` +
+        `Норма обновится через ${quota.resetsIn}. Текст песни, если он нужен, я напишу и без музыки: ` +
+        '<code>/гем сочини песню про дедлайны</code>',
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
+  // Слова показываются сразу, пока пишется музыка: их всё равно захотят прочесть,
+  // а в подпись к аудио они не влезут — у Telegram там 1024 знака.
+  const notice = await ctx.reply(
+    [
+      `🎵 <b>${escapeHtml(title)}</b> — пишу…`,
+      '',
+      `<i>${escapeHtml(plan.stylePrompt)}</i>`,
+      '',
+      instrumental ? '<i>Без вокала.</i>' : escapeHtml(plan.lyrics).slice(0, 3000),
+    ].join('\n'),
+    { parse_mode: 'HTML' },
+  );
+
+  try {
+    const track = await withChatAction(ctx, 'upload_document', () =>
+      generateTrack({ stylePrompt: plan.stylePrompt, lyrics: plan.lyrics, duration }),
+    );
+
+    const left = Number.isFinite(quota.remaining) ? `, осталось на сегодня ${quota.remaining} из ${quota.limit}` : '';
+    const extension = track.mimeType === 'audio/wav' ? 'wav' : 'mp3';
+
+    await ctx.replyWithAudio(new InputFile(track.data, `track.${extension}`), {
+      title,
+      performer: 'Ace-Step',
+      duration: track.duration,
+      caption:
+        `🎵 <b>${escapeHtml(title)}</b>\n` +
+        `<i>${duration} с, $${track.costUsd.toFixed(3)}, готовилось ${(track.elapsedMs / 1000).toFixed(0)} с${left}</i>`,
+      parse_mode: 'HTML',
+    });
+
+    // Сообщение с текстом остаётся в разделе — под ним и подпевают, — но «пишу…»
+    // из него убираем: работа кончилась.
+    await ctx.api
+      .editMessageText(
+        notice.chat.id,
+        notice.message_id,
+        [
+          `🎵 <b>${escapeHtml(title)}</b>`,
+          '',
+          `<i>${escapeHtml(plan.stylePrompt)}</i>`,
+          '',
+          instrumental ? '<i>Без вокала.</i>' : escapeHtml(plan.lyrics).slice(0, 3000),
+        ].join('\n'),
+        { parse_mode: 'HTML' },
+      )
+      .catch(() => undefined);
+  } catch (error) {
+    // Трек не вышел — слот нормы возвращаем: платим за музыку, а не за попытку.
+    // GoAPI берёт деньги за завершённую задачу, так что отказ на заказе или
+    // в очереди не стоит ничего.
+    await trackQuota.release(userId);
+    await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
     await replyWithError(ctx, error);
   }
 }
