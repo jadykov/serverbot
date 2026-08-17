@@ -1,5 +1,5 @@
 /**
- * Команды, работающие с нейросетями: /гем (/gem) и /reset.
+ * Команды, работающие с нейросетями: /гем и /gem.
  *
  * Точка входа намеренно одна. Раньше рядом жили /ask и /ai — выбор провайдера
  * кнопками и запрос к выбранному, — но текстовый провайдер настроен ровно один,
@@ -55,7 +55,7 @@ import { rememberMessage, searchMessages } from '../services/search-index.js';
 import { BOX_COLORS, drawBoxes, findObjects } from '../services/pointing.js';
 import { prepareDocument } from '../services/documents.js';
 import { handleFile, sendAnswerAsFile, takeAnswerFormat, type AnswerFormat } from './file.js';
-import { resolveChain, THINK_CHAIN, type ChainInfo } from '../models.js';
+import { MAIN_CHAIN, resolveChain, THINK_CHAIN, type ChainInfo } from '../models.js';
 import {
   ProviderNotConfiguredError,
   ProviderRequestError,
@@ -275,15 +275,12 @@ async function askChain(
   try {
     // Историю передаём укороченной: длинный контекст = дороже и медленнее.
     const history = takeHistory(ctx.session.history, config.ai.historyLimit);
-    // Промпт раздела перекрывает общий, если его задали командой /режим.
-    const systemPrompt = ctx.session.systemPrompt || undefined;
 
     // Пока модель думает, показываем «печатает…».
     const answer = await withChatAction(ctx, asFile ? 'upload_document' : 'typing', () =>
       generateWithChain(provider, chain.models, prompt, {
         history,
         attachments,
-        systemPrompt,
         // Потолок ответа: у цепочки свой (он упирается в минутную норму
         // её моделей), файловый ещё выше — файла просят ради длинного,
         // а для ответа в одно сообщение берётся самый скромный.
@@ -506,7 +503,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   const gemini = await requireGemini(ctx);
   if (!gemini) return;
 
-  const chain = think ? resolveChain(THINK_CHAIN) : resolveChain(ctx.session.chainId);
+  const chain = think ? resolveChain(THINK_CHAIN) : resolveChain(MAIN_CHAIN);
   const answered = await askChain(ctx, gemini, chain, prompt, { asFile: fileFormat });
 
   // Запрос начался со слова-переключателя, но без «!». Отвечаем как на обычный
@@ -800,7 +797,7 @@ async function handleRepliedPhoto(ctx: BotContext, fileId: string, rawPrompt: st
     }
 
     const prompt = rawPrompt.trim() || DEFAULT_IMAGE_PROMPT;
-    await askChain(ctx, gemini, resolveChain(ctx.session.chainId), prompt, { attachments: [image] });
+    await askChain(ctx, gemini, resolveChain(MAIN_CHAIN), prompt, { attachments: [image] });
   } catch (error) {
     await replyWithError(ctx, error);
   }
@@ -826,7 +823,7 @@ async function handleReplyToBot(ctx: BotContext, text: string, quoted: string): 
     ? `Пользователь отвечает на твою реплику:\n«${quoted.slice(0, 700)}»\n\nЕго ответ: ${text}`
     : text;
 
-  await askChain(ctx, gemini, resolveChain(ctx.session.chainId), prompt, { historyText: text });
+  await askChain(ctx, gemini, resolveChain(MAIN_CHAIN), prompt, { historyText: text });
 }
 
 /**
@@ -941,7 +938,7 @@ async function handlePhotos(ctx: BotContext, fileIds: string[], caption: string)
       return;
     }
 
-    await askChain(ctx, gemini, resolveChain(ctx.session.chainId), request.prompt, { attachments });
+    await askChain(ctx, gemini, resolveChain(MAIN_CHAIN), request.prompt, { attachments });
   } catch (error) {
     await replyWithError(ctx, error);
   }
@@ -971,13 +968,6 @@ export function registerAiCommands(bot: Bot<BotContext>): void {
     if (ctx.message?.photo) return next();
 
     await handleGemini(ctx, extractPrompt(ctx, match?.[2] ?? ''));
-  });
-
-  // ---------------------------------------------------------------- /reset
-  bot.command('reset', async (ctx) => {
-    const removed = ctx.session.history.length;
-    ctx.session.history = [];
-    await ctx.reply(`🧹 История диалога очищена (было сообщений: ${removed}). Начинаем с чистого листа.`);
   });
 
   // ------------------------------------------------------------ картинки
