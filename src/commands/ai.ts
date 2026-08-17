@@ -50,7 +50,7 @@ import { sessionKey, withChatAction } from '../utils.js';
 import { collectAlbumPart, downloadAttachment, pickPhotoFileId } from '../media.js';
 import { generateWithChain } from '../services/chain.js';
 import { startDraw } from './draw.js';
-import { synthesizeSpeech } from '../services/gemini-tts.js';
+import { listVoiceNames, parseVoiceRequest, synthesizeSpeech } from '../services/gemini-tts.js';
 import { rememberMessage, searchMessages } from '../services/search-index.js';
 import { BOX_COLORS, drawBoxes, findObjects } from '../services/pointing.js';
 import { prepareDocument } from '../services/documents.js';
@@ -676,7 +676,22 @@ async function handleSendToDm(ctx: BotContext): Promise<void> {
  * Без текста берётся последний ответ бота из истории раздела — обычно
  * человек как раз его и хочет послушать, а переписывать его руками глупо.
  */
+/**
+ * Заказ голоса перед текстом: «/гем !скажи «низкий» привет, коллеги».
+ *
+ * Кавычки обязательны, и это не придирка. Без них не отличить голос от речи:
+ * «!скажи низкий поклон всем» — это просьба прочитать фразу про поклон,
+ * а не прочитать «поклон всем» низким голосом. Кавычки годятся любые,
+ * какие поставит клавиатура: «ёлочки», "прямые", 'одинарные'.
+ */
+const VOICE_SPEC = /^\s*[«"'“]([^«»"'”]{1,60})[»"'”]\s*([\s\S]*)$/;
+
 async function handleSpeak(ctx: BotContext, request: string): Promise<void> {
+  // Голос и манера, если их заказали кавычками в начале.
+  const spec = VOICE_SPEC.exec(request);
+  const voiceRequest = spec ? parseVoiceRequest(spec[1] ?? '') : {};
+  const asked = spec ? (spec[2] ?? '').trim() : request;
+
   // Что озвучивать, по убыванию определённости:
   //   1. текст после «!скажи» — сказано прямо, спорить не о чем;
   //   2. сообщение, на которое ответили реплаем, — показано пальцем.
@@ -686,11 +701,17 @@ async function handleSpeak(ctx: BotContext, request: string): Promise<void> {
   const replyTo = ctx.message?.reply_to_message;
   const quoted = (replyTo?.text ?? replyTo?.caption ?? '').trim();
   const lastAnswer = [...ctx.session.history].reverse().find((message) => message.role === 'assistant')?.text;
-  const source = request || quoted || lastAnswer || '';
+  const source = asked || quoted || lastAnswer || '';
 
   if (!source) {
     await ctx.reply(
       'Напишите, что произнести:\n<code>/гем !скажи привет, коллеги</code>\n\n' +
+        'Голос и манеру можно заказать кавычками перед текстом:\n' +
+        '<code>/гем !скажи «низкий» привет, коллеги</code>\n' +
+        '<code>/гем !скажи «как в Warcraft 3» работа не ждёт</code>\n\n' +
+        `Готовые голоса: ${listVoiceNames().join(', ')}. ` +
+        'Всё остальное в кавычках — это манера, и просить можно что угодно: ' +
+        'шёпотом, устало, торжественно.\n\n' +
         'Или ответьте этой командой на сообщение — озвучу его. Без того и другого ' +
         'я читаю свой последний ответ, но в этом разделе я ещё ничего не отвечал.',
       { parse_mode: 'HTML' },
@@ -703,9 +724,10 @@ async function handleSpeak(ctx: BotContext, request: string): Promise<void> {
   const { text, trimmed } = trimForSpeech(plain.trim(), config.tts.maxChars);
 
   try {
-    const speech = await withChatAction(ctx, 'record_voice', () => synthesizeSpeech(text));
+    const speech = await withChatAction(ctx, 'record_voice', () => synthesizeSpeech(text, voiceRequest));
 
     const notes = [
+      spec ? `голос: ${spec[1]}` : '',
       speech.skipped.length > 0 ? 'озвучивала запасная модель' : '',
       trimmed ? `прочитано ${text.length} знаков из ${plain.length}` : '',
     ].filter(Boolean);

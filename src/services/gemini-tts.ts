@@ -37,6 +37,69 @@ export interface Speech {
   elapsedMs: number;
 }
 
+/**
+ * Готовые голоса Gemini и русские слова, которыми их зовут.
+ *
+ * У модели два разных рычага, и это стоит различать:
+ *
+ *   • голос (voiceName) — кто говорит. Набор закрытый, назвать можно только
+ *     то, что есть у Google;
+ *   • манера — как говорит. Задаётся обычными словами прямо в запросе
+ *     («Скажи испуганным шёпотом: …»), и здесь можно просить что угодно,
+ *     хоть «как в Warcraft 3».
+ *
+ * Отсюда и устройство таблицы: знакомое слово переключает голос, всё
+ * остальное уходит моделью как описание манеры. Незнакомое слово — не ошибка
+ * и не повод ругаться: «хрипло и устало» голосом не является, но манерой
+ * является вполне.
+ */
+const VOICES: Record<string, { voice: string; about: string }> = {
+  низкий: { voice: 'Charon', about: 'спокойный низкий' },
+  высокий: { voice: 'Leda', about: 'высокий молодой' },
+  бодрый: { voice: 'Puck', about: 'бодрый, с подъёмом' },
+  твёрдый: { voice: 'Kore', about: 'твёрдый, ровный' },
+  твердый: { voice: 'Kore', about: 'твёрдый, ровный' },
+  мягкий: { voice: 'Aoede', about: 'мягкий, лёгкий' },
+  яркий: { voice: 'Zephyr', about: 'яркий, звонкий' },
+  напористый: { voice: 'Fenrir', about: 'напористый, громкий' },
+  уверенный: { voice: 'Orus', about: 'уверенный, деловой' },
+};
+
+/** Как просить озвучку: готовый голос, своя манера или и то и другое. */
+export interface VoiceRequest {
+  /** Имя голоса Google. Пусто — берём из настроек (GEMINI_TTS_VOICE). */
+  voice?: string;
+  /** Манера, словами: «шёпотом», «как в Warcraft 3», «устало и хрипло». */
+  style?: string;
+}
+
+/** Список голосов для справки: «низкий, высокий, бодрый…». */
+export function listVoiceNames(): string[] {
+  // Дубли ради буквы «ё» (твёрдый/твердый) в справке ни к чему.
+  return [...new Set(Object.entries(VOICES).map(([name]) => name))].filter((name) => name !== 'твердый');
+}
+
+/**
+ * Разбирает заказ голоса: знакомое слово — голос, всё прочее — манера.
+ *
+ * Слов может быть и несколько: «низкий, устало» — это и голос Charon,
+ * и просьба читать устало.
+ */
+export function parseVoiceRequest(spec: string): VoiceRequest {
+  const words = spec
+    .toLowerCase()
+    .split(/[\s,;]+/)
+    .filter(Boolean);
+
+  const known = words.find((word) => VOICES[word]);
+  const rest = words.filter((word) => word !== known).join(' ');
+
+  return {
+    ...(known ? { voice: VOICES[known]!.voice } : {}),
+    ...(rest ? { style: rest } : {}),
+  };
+}
+
 const PROVIDER_ID = 'gemini-tts';
 
 /** Частота дискретизации, которую отдаёт Gemini TTS. */
@@ -129,16 +192,23 @@ function pcmToOpus(pcm: Buffer): Promise<Buffer> {
 }
 
 /** Один запрос к одной модели. Возвращает сырой PCM. */
-async function synthesizeOnce(text: string, model: string): Promise<Buffer> {
+async function synthesizeOnce(text: string, model: string, voice: string, style?: string): Promise<Buffer> {
+  /**
+   * Манера задаётся не параметром, а словами перед текстом — так устроен
+   * Gemini TTS: «Скажи испуганным шёпотом: …». Сама эта фраза вслух
+   * не читается, модель понимает её как указание, а не как часть текста.
+   */
+  const prompt = style ? `Скажи ${style}: ${text}` : text;
+
   const response = await withTimeout(
     getClient().models.generateContent({
       model,
-      contents: [{ role: 'user', parts: [{ text }] }],
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
       config: {
         // Модель обязана ответить звуком, а не текстом.
         responseModalities: ['AUDIO'],
         speechConfig: {
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: config.tts.voice } },
+          voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } },
         },
       },
     }),
@@ -173,7 +243,7 @@ const RETRYABLE = new Set(['quota', 'not-found', 'server']);
  * норма и отсутствие модели — повод попробовать соседнюю, отказ цензуры
  * и неверный ключ — нет.
  */
-export async function synthesizeSpeech(text: string): Promise<Speech> {
+export async function synthesizeSpeech(text: string, request: VoiceRequest = {}): Promise<Speech> {
   if (!config.gemini.apiKey) {
     throw new ProviderRequestError(PROVIDER_ID, 'Не задан GEMINI_API_KEY — озвучивать нечем.', { kind: 'auth' });
   }
@@ -181,11 +251,29 @@ export async function synthesizeSpeech(text: string): Promise<Speech> {
   const models = config.tts.chain;
   const startedAt = Date.now();
   const skipped: string[] = [];
+  const voice = request.voice ?? config.tts.voice;
   let lastError: ProviderRequestError | undefined;
 
   for (const model of models) {
     try {
-      const pcm = await synthesizeOnce(text, model);
+      let pcm: Buffer;
+      try {
+        pcm = await synthesizeOnce(text, model, voice, request.style);
+      } catch (error) {
+        // Набор голосов у Google меняется, и наш список может отстать.
+        // Отказ из-за имени голоса — не повод остаться без озвучки:
+        // повторяем тем же ходом, но голосом из настроек.
+        const wrongVoice =
+          voice !== config.tts.voice &&
+          error instanceof Error &&
+          /voice/i.test(error.message) &&
+          /invalid|not found|unsupported|400/i.test(error.message);
+
+        if (!wrongVoice) throw error;
+
+        logger.warn('Модель не приняла голос, повторяю голосом по умолчанию', { model, voice });
+        pcm = await synthesizeOnce(text, model, config.tts.voice, request.style);
+      }
       const useVoice = hasFfmpeg();
       // Даже если ffmpeg есть, но споткнулся, — отдадим WAV, а не ошибку:
       // человеку нужна озвучка, а не рассказ про кодеки.
@@ -209,6 +297,8 @@ export async function synthesizeSpeech(text: string): Promise<Speech> {
       logger.info('Текст озвучен', {
         model,
         skipped,
+        voiceName: voice,
+        ...(request.style ? { style: request.style } : {}),
         chars: text.length,
         kb: Math.round(data.length / 1024),
         voice: isVoice,
