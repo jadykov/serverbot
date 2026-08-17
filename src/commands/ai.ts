@@ -16,6 +16,7 @@
  *   /гем !найди <что искать>  — поиск по переписке раздела;
  *   /гем !файл <что сделать>  — ответ отдельным файлом;
  *   /гем !где здесь <предмет> — рамка поверх фотографии;
+ *   /гем !расшифруй (реплаем) — послушать голосовое и ответить по существу;
  *   /гем !личка (реплаем)    — переслать сообщение в личный диалог.
  *
  * Слова-переключатели существуют только по-русски. Латинские формы (!draw,
@@ -55,7 +56,7 @@ import { rememberMessage, searchMessages } from '../services/search-index.js';
 import { BOX_COLORS, drawBoxes, findObjects } from '../services/pointing.js';
 import { prepareDocument } from '../services/documents.js';
 import { handleFile, sendAnswerAsFile, takeAnswerFormat, type AnswerFormat } from './file.js';
-import { MAIN_CHAIN, resolveChain, THINK_CHAIN, type ChainInfo } from '../models.js';
+import { MAIN_CHAIN, resolveChain, THINK_CHAIN, VOICE_CHAIN, type ChainInfo } from '../models.js';
 import {
   ProviderNotConfiguredError,
   ProviderRequestError,
@@ -136,6 +137,18 @@ const DM_PREFIX = switchWord('личка|лс');
 const SEARCH_PREFIX = switchWord('найди|найти');
 
 /**
+ * Седьмое слово-переключатель: «/гем !расшифруй» реплаем на голосовое.
+ *
+ * Слово нужно ровно потому, что голосовому нельзя написать подпись: у снимка
+ * и файла есть caption, которым в группе и обращаются к боту, а у голосового
+ * его нет. Единственный способ показать на него пальцем — ответить реплаем,
+ * и в этом реплае должно быть хоть что-то. Вот это «что-то».
+ *
+ * Расшифровку при этом бот не печатает — см. VOICE_RULE ниже.
+ */
+const VOICE_PREFIX = switchWord('расшифруй|послушай');
+
+/**
  * Та же команда, но в подписи к фотографии: «/гем что здесь написано».
  * Латинская и кириллическая формы вместе — в подписи Telegram не размечает
  * команды, так что разбираем обе одинаково, обычным текстом.
@@ -147,7 +160,7 @@ const MEDIA_COMMAND = /^\/(?:гем|gem)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/
  * а чтобы подсказать: человек, привыкший к прежнему синтаксису, иначе решит,
  * что рисование сломалось. Ответ на вопрос он при этом всё равно получит.
  */
-const FORGOTTEN_BANG = /^(?:нарисуй|контекст|скажи|найди|найти)(?:[\s,:.—–-]|$)/i;
+const FORGOTTEN_BANG = /^(?:нарисуй|контекст|скажи|найди|найти|расшифруй)(?:[\s,:.—–-]|$)/i;
 
 /**
  * Добавка к инструкции для любого ответа, который идёт в чат.
@@ -165,6 +178,28 @@ const ONE_POST_RULE = [
 
 /** Что спросить у модели, если картинку прислали вообще без подписи. */
 const DEFAULT_IMAGE_PROMPT = 'Что на этой картинке? Опиши кратко и по делу.';
+
+/**
+ * Правило для любого голосового: отвечать по сказанному, а расшифровку
+ * держать при себе.
+ *
+ * Это осознанный выбор, а не экономия. Расшифровка нужна тому, кто голосовое
+ * не слушал, — но в чате его уже послушали все, и стена текста поверх
+ * прозвучавшего только засоряет топик. Модель слышит запись целиком, так что
+ * отвечает она по смыслу, а не по пересказу; человеку остаётся собственно
+ * ответ. Правило поэтому именно правило по умолчанию, а не запрет: попросят
+ * расшифровку прямо («!расшифруй выпиши дословно») — модель её даст.
+ */
+const VOICE_RULE =
+  'Тебе прислали голосовое сообщение из чата — ты слышишь запись целиком. ' +
+  'По умолчанию расшифровку не приводи и сказанное не пересказывай: собеседники уже всё слышали, ' +
+  'повтор им не нужен, — отвечай сразу по существу. ' +
+  'Исключение одно: если расшифровку или дословную выписку попросили прямо, дай её.';
+
+/** Что делать с голосовым, если вопроса к нему не задали. */
+const VOICE_DEFAULT_TASK =
+  'Ответь по существу сказанного — так же, как ответил бы на такое же сообщение текстом. ' +
+  'Если это не вопрос, а просто реплика, отзовись на неё коротко и по делу.';
 
 /** Единая обработка ошибок нейросетей: пользователю — подсказка, в лог — детали. */
 async function replyWithError(ctx: BotContext, error: unknown): Promise<void> {
@@ -394,6 +429,31 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
     return;
   }
 
+  /**
+   * Реплай на голосовое: «/гем !расшифруй» или сразу вопрос по записи —
+   * «/гем что он просит сделать».
+   *
+   * Ветка нужна по той же причине, что и ветка реплая на фотографию: самой
+   * записи в этом сообщении нет, она в том, на которое ответили, и обработчик
+   * голосовых сюда не добирается. Прочие слова-переключатели пропускаем
+   * дальше: «!скажи» или «!найди» рядом с голосовым — всё равно про своё.
+   */
+  const repliedVoice = ctx.message?.reply_to_message?.voice;
+  const voiceWord = VOICE_PREFIX.exec(trimmed);
+  const ownsVoice =
+    repliedVoice &&
+    !DRAW_PREFIX.test(trimmed) &&
+    !FILE_PREFIX.test(trimmed) &&
+    !SPEAK_PREFIX.test(trimmed) &&
+    !SEARCH_PREFIX.test(trimmed) &&
+    !CONTEXT_PREFIX.test(trimmed);
+
+  if (repliedVoice && ownsVoice) {
+    // «!расшифруй выпиши дословно» — слово съедаем, остаток остаётся вопросом.
+    await handleVoice(ctx, repliedVoice, voiceWord ? (voiceWord[1] ?? '').trim() : trimmed);
+    return;
+  }
+
   const repliedDocument = ctx.message?.reply_to_message?.document;
   if (repliedDocument && !FILE_PREFIX.test(trimmed)) {
     await handleDocument(ctx, repliedDocument.file_id, repliedDocument.file_name ?? 'файл', `/гем ${rawPrompt}`);
@@ -426,6 +486,16 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
         'Ещё можно ответить командой <code>/гем</code> на любое сообщение — я возьму его текст, ' +
         'а если это фотография, разберу её.',
       { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
+  // «!расшифруй» без голосового: слушать нечего. Молча ответить текстом было бы
+  // хуже всего — человек решит, что бот записи не слышит в принципе.
+  if (voiceWord) {
+    await ctx.reply(
+      '«!расшифруй» работает по голосовому: ответьте этой командой на голосовое сообщение.\n\n' +
+        'В личке команда и вовсе не нужна — пришлите голосовое, и я отвечу.',
     );
     return;
   }
@@ -753,7 +823,16 @@ async function handleSpeak(ctx: BotContext, request: string): Promise<void> {
  * бы в любую беседу. Поэтому в группе нужен явный признак обращения: команда
  * в подписи либо ответ на сообщение самого бота. В личке признак не нужен.
  */
-function resolveImageRequest(ctx: BotContext, caption: string): { prompt: string } | null {
+function resolveImageRequest(
+  ctx: BotContext,
+  caption: string,
+  /**
+   * Чем заменить пустую подпись. У снимка это «что на картинке?», у голосового
+   * — ничего: там пустой запрос осмыслен сам по себе и означает «ответь по
+   * сказанному» (см. VOICE_DEFAULT_TASK).
+   */
+  fallback: string = DEFAULT_IMAGE_PROMPT,
+): { prompt: string } | null {
   const match = MEDIA_COMMAND.exec(caption.trim());
 
   // «/гем@другой_бот» в общем чате — не наше дело.
@@ -767,7 +846,7 @@ function resolveImageRequest(ctx: BotContext, caption: string): { prompt: string
 
   // С командой берём остаток подписи, без команды — всю подпись целиком.
   const asked = (match ? (match[2] ?? '') : caption).trim();
-  return { prompt: asked || DEFAULT_IMAGE_PROMPT };
+  return { prompt: asked || fallback };
 }
 
 /**
@@ -913,6 +992,62 @@ async function handleDocument(ctx: BotContext, fileId: string, fileName: string,
   }
 }
 
+/** То немногое, что нужно от голосового: где взять файл и сколько он длится. */
+interface VoiceMessage {
+  file_id: string;
+  duration: number;
+  mime_type?: string;
+}
+
+/** Длительность записи человеческим видом: 0:42, 3:05. */
+function formatDuration(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+/**
+ * Голосовое сообщение: бот слушает запись и отвечает по сказанному.
+ *
+ * Отдельного «распознавания речи» здесь нет и не нужно. Голосовое уходит в
+ * модель ровно тем же путём, что фотография, — вложением в обычный запрос
+ * (см. inlineData в src/services/gemini.ts). Google берёт за звук 32 токена
+ * на секунду, так что минута разговора обходится примерно в 2000 токенов:
+ * дешевле, чем пара снимков, и несравнимо щедрее озвучки, у которой своя
+ * отдельная норма в десяток запросов на модель в сутки.
+ *
+ * Цепочка своя, голосовая: в основной первой стоит Gemma, а она звука не
+ * слышит (см. config.gemini.chains.voice).
+ *
+ * В историю раздела попадает только пометка о том, что голосовое было, и
+ * ответ бота. Само сказанное там не сохраняется — как и содержимое снимков.
+ * На продолжение разговора этого хватает: о чём шла речь, видно из ответа.
+ */
+async function handleVoice(ctx: BotContext, voice: VoiceMessage, question: string): Promise<void> {
+  const gemini = await requireGemini(ctx);
+  if (!gemini) return;
+
+  const length = formatDuration(voice.duration ?? 0);
+
+  try {
+    // mime_type у голосовых Telegram присылает сам — обычно audio/ogg.
+    const audio = await withChatAction(ctx, 'typing', () =>
+      downloadAttachment(ctx, voice.file_id, voice.mime_type ?? 'audio/ogg'),
+    );
+
+    logger.info('Разбираю голосовое', {
+      length,
+      kb: Math.round(audio.data.length / 1024),
+      asked: question || '(без вопроса)',
+    });
+
+    await askChain(ctx, gemini, resolveChain(VOICE_CHAIN), `${VOICE_RULE}\n\n${question || VOICE_DEFAULT_TASK}`, {
+      attachments: [audio],
+      historyText: `Прислал голосовое (${length}).${question ? ` ${question}` : ''}`,
+    });
+  } catch (error) {
+    await replyWithError(ctx, error);
+  }
+}
+
 /** Скачивает картинки и отправляет их в модель вместе с вопросом. */
 async function handlePhotos(ctx: BotContext, fileIds: string[], caption: string): Promise<void> {
   const request = resolveImageRequest(ctx, caption);
@@ -952,6 +1087,11 @@ export function registerAiCommands(bot: Bot<BotContext>): void {
     // ход, иначе подпись «/гем !где каша» отвечала бы текстом.
     if (ctx.message?.photo) return next();
 
+    // То же и с подписью к голосовому. Написать её позволяет не всякий клиент,
+    // но если написали — запись должен разобрать обработчик голосовых, иначе
+    // бот ответит на подпись текстом, будто никакого голосового и не было.
+    if (ctx.message?.voice) return next();
+
     await handleGemini(ctx, extractPrompt(ctx, ctx.match));
   });
 
@@ -966,6 +1106,7 @@ export function registerAiCommands(bot: Bot<BotContext>): void {
     // hears в grammY срабатывает и на подпись к фотографии — отдаём её
     // обработчику снимков по той же причине, что и латинскую форму команды.
     if (ctx.message?.photo) return next();
+    if (ctx.message?.voice) return next();
 
     await handleGemini(ctx, extractPrompt(ctx, match?.[2] ?? ''));
   });
@@ -995,6 +1136,19 @@ export function registerAiCommands(bot: Bot<BotContext>): void {
   bot.on('message:document', async (ctx) => {
     const document = ctx.message.document;
     await handleDocument(ctx, document.file_id, document.file_name ?? 'файл', ctx.message.caption ?? '');
+  });
+
+  // ---------------------------------------------------------- голосовые
+  // Правила обращения общие для всех вложений (см. resolveImageRequest):
+  // в личке достаточно самого голосового, в группе — либо подпись с командой
+  // (её позволяют не все клиенты), либо голосовое реплаем на реплику бота.
+  // Показать боту чужое голосовое в группе можно только реплаем с «/гем» —
+  // эту ветку разбирает handleGemini.
+  bot.on('message:voice', async (ctx) => {
+    const request = resolveImageRequest(ctx, ctx.message.caption ?? '', '');
+    if (!request) return;
+
+    await handleVoice(ctx, ctx.message.voice, request.prompt);
   });
 
   // --------------------------------------------------- обычные сообщения
