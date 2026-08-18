@@ -52,8 +52,15 @@ export interface Speech {
  * остальное уходит моделью как описание манеры. Незнакомое слово — не ошибка
  * и не повод ругаться: «хрипло и устало» голосом не является, но манерой
  * является вполне.
+ *
+ * Важное исключение — пол. Он манерой не задаётся вовсе: сколько ни проси
+ * «мужской голос в стиле Джесси Пинкмана», манеру модель отыграет, а говорить
+ * будет голосом из настроек, то есть женским Kore. Поэтому «мужской»
+ * и «женский» стоят в таблице наравне с «низким» и «высоким».
  */
 const VOICES: Record<string, { voice: string; about: string }> = {
+  мужской: { voice: 'Charon', about: 'мужской, спокойный' },
+  женский: { voice: 'Kore', about: 'женский, ровный' },
   низкий: { voice: 'Charon', about: 'спокойный низкий' },
   высокий: { voice: 'Leda', about: 'высокий молодой' },
   бодрый: { voice: 'Puck', about: 'бодрый, с подъёмом' },
@@ -80,23 +87,66 @@ export function listVoiceNames(): string[] {
 }
 
 /**
+ * Слова про пол говорящего: падежи и привычные синонимы.
+ *
+ * Отдельным списком, а не строками в таблице, потому что пишут их как придётся
+ * — «мужской», «мужским», «мужчина», — а голос за каждым стоит один и тот же.
+ * Сравниваем по началу слова: окончание здесь ничего не решает.
+ */
+const GENDERS: Array<{ start: RegExp; name: string }> = [
+  { start: /^(?:мужск|мужчин|парен|пацан)/, name: 'мужской' },
+  { start: /^(?:женск|женщин|девуш|девич)/, name: 'женский' },
+];
+
+/** «Голос» сразу после заказа: в манеру это слово не идёт. */
+const VOICE_FILLER = /^голос(?:ом|а|е|у)?$/;
+
+/** Для сравнения со словарём: регистр и знаки препинания только мешают. */
+function normalizeWord(word: string): string {
+  return word.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+}
+
+/**
  * Разбирает заказ голоса: знакомое слово — голос, всё прочее — манера.
  *
  * Слов может быть и несколько: «низкий, устало» — это и голос Charon,
- * и просьба читать устало.
+ * и просьба читать устало. Знакомое слово берём одно, первое: «низкий, мягкий»
+ * — это низкий голос, прочитанный мягко, а не спор двух голосов.
+ *
+ * Регистр остальных слов сохраняем: манера уходит модели текстом, и «в стиле
+ * Джесси Пинкмана» читается ей понятнее, чем то же самое строчными.
  */
 export function parseVoiceRequest(spec: string): VoiceRequest {
-  const words = spec
-    .toLowerCase()
-    .split(/[\s,;]+/)
-    .filter(Boolean);
+  const words = spec.split(/[\s,;]+/).filter(Boolean);
 
-  const known = words.find((word) => VOICES[word]);
-  const rest = words.filter((word) => word !== known).join(' ');
+  let voice: string | undefined;
+  let chosenAt = -1;
+  const rest: string[] = [];
+
+  words.forEach((word, index) => {
+    const plain = normalizeWord(word);
+
+    if (!voice) {
+      const known = VOICES[plain] ? plain : GENDERS.find(({ start }) => start.test(plain))?.name;
+
+      if (known) {
+        voice = VOICES[known]!.voice;
+        chosenAt = index;
+        return;
+      }
+    }
+
+    // «мужской голос в стиле …»: слово «голос» тут служебное, и в просьбу
+    // к модели ему не надо — «Скажи голос в стиле …» звучит как оговорка.
+    // Само по себе оно остаётся: «голосом робота» без него станет «робота».
+    if (voice && index === chosenAt + 1 && VOICE_FILLER.test(plain)) return;
+
+    rest.push(word);
+  });
 
   return {
-    ...(known ? { voice: VOICES[known]!.voice } : {}),
-    ...(rest ? { style: rest } : {}),
+    ...(voice ? { voice } : {}),
+    ...(rest.length > 0 ? { style: rest.join(' ') } : {}),
   };
 }
 
