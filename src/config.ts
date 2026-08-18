@@ -108,7 +108,7 @@ export const config = {
   adminIds: envIdList('ADMIN_IDS'),
 
   rateLimit: {
-    max: envInt('RATE_LIMIT_MAX', 15),
+    max: envInt('RATE_LIMIT_MAX', 50),
     windowMs: envInt('RATE_LIMIT_WINDOW_MS', 60_000),
   },
 
