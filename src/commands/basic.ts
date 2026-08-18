@@ -90,6 +90,7 @@ const HELP_TEXT = [
   '/marco и /polo — отвечу «Polo!» и «Marco!»',
   '/test — связь и готовность нейросетей',
   '/test ai — то же плюс живой запрос',
+  '/stop — замолчать в этом разделе, /start — включить обратно',
   '/whoami — ваши id пользователя и чата',
   '/status — аптайм, память, режим работы',
   '/help — эта справка</blockquote>',
@@ -119,12 +120,71 @@ async function sendHelp(ctx: BotContext, prefix = ''): Promise<void> {
   }
 }
 
+/**
+ * Кириллические двойники выключателя: /стоп, /старт и их разговорные формы.
+ *
+ * Telegram считает командой только латиницу, поэтому /стоп в меню не попадёт
+ * и командой размечен не будет — ловим его текстом, ровно как /гем
+ * (см. commands/ai.ts). Имя бота после команды допускается: в группе клиент
+ * подставляет его сам.
+ */
+const CYRILLIC_STOP = /^\/(?:стоп|выключись)(?:@[A-Za-z0-9_]+)?\s*$/i;
+const CYRILLIC_START = /^\/(?:старт|включись)(?:@[A-Za-z0-9_]+)?\s*$/i;
+
+/**
+ * Выключает бота в разделе. Кто именно выключил — говорим вслух: в группе
+ * замолчавший бот иначе выглядит сломавшимся, и разбираться пойдут все сразу.
+ */
+async function muteHere(ctx: BotContext): Promise<void> {
+  const who = escapeHtml(ctx.from?.first_name ?? 'кто-то');
+
+  if (ctx.session.muted) {
+    await ctx.reply('🔇 Я и так молчу в этом разделе. Включить обратно — /start');
+    return;
+  }
+
+  ctx.session.muted = true;
+  logger.info('Бот выключен в разделе', { chatId: ctx.chat?.id, userId: ctx.from?.id });
+
+  await ctx.reply(
+    `🔇 Молчу в этом разделе — выключил <b>${who}</b>.\n\n` +
+      'Здесь я больше не отвечаю, не трачу квоты и не записываю переписку в архив поиска. ' +
+      'Остальные разделы работают как работали.\n\n' +
+      'Включить обратно — /start, и это может сделать любой.',
+    { parse_mode: 'HTML' },
+  );
+}
+
+/**
+ * Включает бота обратно. Совмещено с приветствием намеренно: «запустить
+ * бота» — это ровно то, что /start и означает, отдельная команда была бы
+ * четвёртым словом, которое надо помнить.
+ *
+ * Полную справку при пробуждении не показываем: её только что не спрашивали,
+ * а она на два экрана.
+ */
+async function unmuteHere(ctx: BotContext): Promise<void> {
+  const name = escapeHtml(ctx.from?.first_name ?? 'друг');
+
+  if (ctx.session.muted) {
+    ctx.session.muted = false;
+    logger.info('Бот включён в разделе', { chatId: ctx.chat?.id, userId: ctx.from?.id });
+
+    await ctx.reply(`🔊 Снова здесь — включил <b>${name}</b>. Справка: /help`, { parse_mode: 'HTML' });
+    return;
+  }
+
+  await sendHelp(ctx, `👋 Привет, <b>${name}</b>!\n\n`);
+}
+
 export function registerBasicCommands(bot: Bot<BotContext>): void {
-  // ---------------------------------------------------------------- /start
-  bot.command('start', async (ctx) => {
-    const name = escapeHtml(ctx.from?.first_name ?? 'друг');
-    await sendHelp(ctx, `👋 Привет, <b>${name}</b>!\n\n`);
-  });
+  // -------------------------------------------------------- /start и /stop
+  // Пара «выключить — включить» на раздел. Прав ни у кого не спрашиваем:
+  // нажать может любой участник (почему — см. middlewares/mute.ts).
+  bot.command('start', unmuteHere);
+  bot.command('stop', muteHere);
+  bot.hears(CYRILLIC_START, unmuteHere);
+  bot.hears(CYRILLIC_STOP, muteHere);
 
   // ----------------------------------------------------------------- /help
   bot.command('help', async (ctx) => {

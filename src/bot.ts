@@ -12,6 +12,7 @@ import { describeError, logger } from './logger.js';
 import { requestLogger } from './middlewares/logging.js';
 import { replyToSender } from './middlewares/reply.js';
 import { rateLimit } from './middlewares/rateLimit.js';
+import { mute } from './middlewares/mute.js';
 import { searchIndexer } from './middlewares/searchIndex.js';
 import { registerBasicCommands } from './commands/basic.js';
 import { registerAiCommands } from './commands/ai.js';
@@ -24,6 +25,7 @@ import type { BotContext, SessionData } from './types.js';
 export const BOT_COMMANDS = [
   { command: 'start', description: 'Запустить бота и увидеть справку' },
   { command: 'help', description: 'Список всех команд' },
+  { command: 'stop', description: 'Замолчать в этом разделе (обратно — /start)' },
   // Кириллическую /гем в это меню добавить нельзя: Telegram принимает
   // в именах команд только латиницу (иначе BOT_COMMAND_INVALID).
   { command: 'gem', description: 'Запрос к Gemini (то же, что /гем). Слова: !нарисуй !скажи !найди !файл' },
@@ -70,14 +72,19 @@ export function createBot(): Bot<BotContext> {
     }),
   );
 
-  // 4. Защита от спама.
+  // 4. Выключатель раздела. Стоит сразу после сессии — она ему и нужна, —
+  //    и до всего остального: в выключенном топике бот не отвечает, не тратит
+  //    квоты и не пополняет архив поиска (см. middlewares/mute.ts).
+  bot.use(mute);
+
+  // 5. Защита от спама.
   bot.use(rateLimit);
 
-  // 5. Архив переписки для поиска по смыслу. Стоит после рейт-лимита:
+  // 6. Архив переписки для поиска по смыслу. Стоит после рейт-лимита:
   //    отбитый спам индексировать незачем.
   bot.use(searchIndexer);
 
-  // 6. Команды. registerAiCommands — последней: внутри неё висит «ловушка»
+  // 7. Команды. registerAiCommands — последней: внутри неё висит «ловушка»
   //    для обычных сообщений, и она должна получать управление после всех.
   //    registerDrawCommands стоит перед ней по той же причине: правка промпта
   //    приходит обычным сообщением, и перехватить его надо раньше ловушки.
@@ -85,7 +92,7 @@ export function createBot(): Bot<BotContext> {
   registerDrawCommands(bot);
   registerAiCommands(bot);
 
-  // 7. Глобальная ловушка ошибок: без неё любое исключение
+  // 8. Глобальная ловушка ошибок: без неё любое исключение
   //    в обработчике уронит поллинг.
   bot.catch(async (botError) => {
     const { ctx, error } = botError;
