@@ -466,22 +466,33 @@ export const config = {
        */
       main: envStringList('GEMINI_CHAIN_MAIN', [
         'gemini-3.5-flash-lite',
-        'gemini-3-flash-preview',
+        'gemini-2.5-flash',
+        'gemini-2.5-flash-lite',
         'gemma-4-31b-it',
       ]),
       /**
        * Запросы «/гем !контекст ...»: дневная квота маленькая, тратится осознанно.
        *
        * Единственная цепочка, которую flash-lite не возглавляет, и намеренно:
-       * она существует ради силы рассуждения, а не ради скорости. Здесь же
-       * идут «!файл» и присланные книги, поэтому Gemma сюда не попадает
-       * ни при каких условиях — окно 262 тысячи токенов против миллиона
-       * у флешей, а PDF она не принимает вовсе.
+       * она существует ради силы рассуждения, а не ради скорости. Порядок —
+       * по убыванию силы, от 3.7 до прошлого поколения, и уже под ним Gemma.
+       *
+       * Про Gemma в хвосте нужна оговорка. Этой же цепочкой идут «!файл»
+       * и присланные книги, а Gemma окном в 262 тысячи токенов ещё вытянет
+       * (предел файла — 150 тысяч, см. config.docs.maxTokens), но PDF
+       * не принимает вовсе. То есть на текстовом «!контексте» она сработает
+       * заглушкой честно, а на присланном PDF ответит отказом. Стоит она
+       * последней, и выбор там не между ней и флешем, а между ней и ошибкой
+       * «перепробованы все», так что хуже от неё не будет.
        */
       think: envStringList('GEMINI_CHAIN_THINK', [
         'gemini-3.7-flash',
         'gemini-3.6-flash',
         'gemini-3.5-flash',
+        'gemini-3-flash-preview',
+        'gemini-2.5-flash',
+        'gemini-2.5-flash-lite',
+        'gemma-4-31b-it',
       ]),
       /**
        * Голосовые на вход.
@@ -501,8 +512,8 @@ export const config = {
         'gemini-3.5-flash-lite',
         'gemini-3.1-flash-lite',
         'gemini-3-flash-preview',
-        'gemini-2.5-flash-lite',
         'gemini-2.5-flash',
+        'gemini-2.5-flash-lite',
       ]),
       /**
        * Ответ по найденным в интернете страницам («/гем !сеть ...»).
@@ -533,8 +544,8 @@ export const config = {
         'gemini-3.5-flash-lite',
         'gemini-3.1-flash-lite',
         'gemini-3-flash-preview',
-        'gemini-2.5-flash-lite',
         'gemini-2.5-flash',
+        'gemini-2.5-flash-lite',
         'gemma-4-31b-it',
       ]),
       /**
@@ -549,6 +560,7 @@ export const config = {
       draw: envStringList('GEMINI_CHAIN_DRAW', [
         'gemini-3.5-flash-lite',
         'gemini-3.1-flash-lite',
+        'gemini-2.5-flash',
         'gemini-2.5-flash-lite',
         'gemma-4-31b-it',
       ]),
