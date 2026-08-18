@@ -60,9 +60,10 @@ import { prepareDocument } from '../services/documents.js';
 import { prepareVoice } from '../services/voice.js';
 import { clampDuration, generateTrack, isMusicConfigured, MUSIC_SETUP_HINT } from '../services/goapi-music.js';
 import { isInstrumental, planSong } from '../services/song-prompt.js';
-import { trackQuota } from '../services/daily-quota.js';
+import { isWebSearchConfigured, searchWeb, WEB_SETUP_HINT } from '../services/openrouter-web.js';
+import { trackQuota, webQuota } from '../services/daily-quota.js';
 import { handleFile, sendAnswerAsFile, takeAnswerFormat, type AnswerFormat } from './file.js';
-import { MAIN_CHAIN, resolveChain, THINK_CHAIN, VOICE_CHAIN, WEB_CHAIN, type ChainInfo } from '../models.js';
+import { MAIN_CHAIN, resolveChain, THINK_CHAIN, VOICE_CHAIN, type ChainInfo } from '../models.js';
 import {
   ProviderNotConfiguredError,
   ProviderRequestError,
@@ -163,12 +164,10 @@ const SEARCH_PREFIX = switchWord('найди|найти');
  * по переписке раздела, «!сеть» — по интернету. Отсюда и слово: «поиск»
  * годилось бы обоим, а «сеть» ни с чем не спутаешь.
  *
- * Поиск включается словом, а не идёт по каждому вопросу, по двум причинам.
- * Первая — норма: запросов с поиском бесплатно 5000 в месяц, а обычных
- * у одной только Gemma на порядки больше. Вторая важнее: инструментов Gemma
- * не понимает вовсе, поэтому запрос с поиском уходит другой цепочкой (WEB_CHAIN),
- * и делать это молча на каждый «привет» — значит без нужды жечь скромную
- * норму флешей вместо бездонной Gemma.
+ * Поиск включается словом, а не идёт по каждому вопросу, потому что стоит
+ * денег: обычный ответ бот отдаёт бесплатной Gemma, а каждый поиск — это
+ * платный вызов к OpenRouter. Отсюда и дневная норма (см. handleWeb ниже),
+ * и то, что «привет» не уходит искать в интернет.
  *
  * «Гугл» принят вторым написанием: слово в такой просьбе приходит в голову
  * первым, даже когда ищет за нас Gemini.
@@ -213,22 +212,6 @@ const ONE_POST_RULE = [
   'Ответ должен уместиться в одно сообщение Telegram: не длиннее 3000 знаков.',
   'Не обрывай мысль на полуслове — лучше короче, но законченно:',
   'сначала главное, подробности только если остаётся место.',
-].join(' ');
-
-/**
- * Добавка для ответов с живым поиском.
- *
- * Нужна из-за двух привычек модели, которые вместе портят ответ. Первая:
- * найдя что-то в интернете, она дописывает снизу собственный список ссылок —
- * и рядом с тем, который приписывает бот, получается два списка подряд.
- * Вторая: с поиском ответы выходят длиннее обычных, а ссылки идут последними
- * и при обрезке по границе сообщения пропадают первыми — то есть теряется
- * ровно то, ради чего поиск и затевался.
- */
-const WEB_ANSWER_RULE = [
-  'Ответ должен уместиться в 2000 знаков: ссылки на источники бот допишет сам,',
-  'и им нужно место. Своего списка источников не составляй и ссылки в текст не вставляй —',
-  'просто отвечай по сути найденного.',
 ].join(' ');
 
 /** Что спросить у модели, если картинку прислали вообще без подписи. */
@@ -342,11 +325,6 @@ interface AskOptions {
    * файла просят как раз ради длинного разбора.
    */
   asFile?: AnswerFormat;
-  /**
-   * Разрешить модели сходить в интернет: «/гем !сеть ...». Ссылки на источники
-   * провайдер дописывает в конец ответа сам (см. services/gemini.ts).
-   */
-  webSearch?: boolean;
 }
 
 async function askChain(
@@ -355,7 +333,7 @@ async function askChain(
   /** Цепочка целиком: из неё берутся и модели, и потолок ответа. */
   chain: ChainInfo,
   prompt: string,
-  { attachments = [], historyText, asFile, webSearch }: AskOptions = {},
+  { attachments = [], historyText, asFile }: AskOptions = {},
 ): Promise<boolean> {
   /**
    * Всё, что идёт в чат, обязано уместиться в одно сообщение — и обычный
@@ -380,8 +358,7 @@ async function askChain(
         // её моделей), файловый ещё выше — файла просят ради длинного,
         // а для ответа в одно сообщение берётся самый скромный.
         maxOutputTokens: asFile ? config.files.answerMaxOutputTokens : chain.maxOutputTokens,
-        ...(onePost ? { extraInstruction: webSearch ? `${ONE_POST_RULE} ${WEB_ANSWER_RULE}` : ONE_POST_RULE } : {}),
-        ...(webSearch ? { webSearch: true } : {}),
+        ...(onePost ? { extraInstruction: ONE_POST_RULE } : {}),
       }),
     );
 
@@ -750,33 +727,80 @@ async function handleSearch(ctx: BotContext, query: string): Promise<void> {
 /**
  * Живой поиск: «/гем !сеть ...».
  *
- * Отличается от обычного вопроса ровно двумя вещами: цепочка своя (в основной
- * первой стоит Gemma, а она инструментов не понимает) и модели разрешено
- * сходить в интернет. Дальше всё как всегда — тот же askChain, та же история
- * раздела, ответ одним сообщением. Ссылки на источники дописывает провайдер
- * (см. collectSources в services/gemini.ts).
+ * Ищет и отвечает один вызов к OpenRouter: найденное подмешивается в тот же
+ * запрос, и модель, которая ищет, она же и пишет ответ (см. services/
+ * openrouter-web.ts). Ссылки на источники бот дописывает сам, из ответа API.
  *
- * Поиском при этом распоряжается модель, а не бот: инструмент — это
- * разрешение, а не приказ. На «сколько будет два плюс два» она в интернет
- * не пойдёт и ответит сама, и ссылок под ответом не будет.
+ * Своей цепочки моделей здесь нет и быть не может: цепочка — это про перебор
+ * бесплатных норм Gemini, а тут платный вызов к другому поставщику. Отказ
+ * поэтому показывается человеку как есть.
+ *
+ * Ответ уходит в историю раздела наравне с обычными: «а поподробнее?» после
+ * поиска — совершенно естественное продолжение разговора.
  */
 async function handleWeb(ctx: BotContext, query: string): Promise<void> {
+  if (!isWebSearchConfigured()) {
+    await ctx.reply(`🔌 Живой поиск не подключён. ${WEB_SETUP_HINT}`);
+    return;
+  }
+
   if (!query) {
     await ctx.reply(
       'Напишите, что узнать в интернете:\n' +
         '<code>/гем !сеть что нового про Gemini 3</code>\n' +
         '<code>/гем !сеть какая погода в Москве</code>\n\n' +
-        'Это поиск по интернету. Поиск по нашей же переписке — ' +
-        'другая команда: <code>/гем !найди …</code>',
+        'Это поиск по интернету, и он платный — ' +
+        `${config.webQuota.perUserPerDay} запросов в день на человека. ` +
+        'Поиск по нашей же переписке бесплатен и делается другой командой: ' +
+        '<code>/гем !найди …</code>',
       { parse_mode: 'HTML' },
     );
     return;
   }
 
-  const gemini = await requireGemini(ctx);
-  if (!gemini) return;
+  const userId = ctx.from?.id;
+  const quota = await webQuota.reserve(userId);
 
-  await askChain(ctx, gemini, resolveChain(WEB_CHAIN), query, { webSearch: true });
+  if (!quota.allowed) {
+    await ctx.reply(
+      `🚫 На сегодня поиски закончились: ${quota.limit} в день на человека — каждый стоит денег.\n\n` +
+        `Норма обновится через ${quota.resetsIn}. Обычные вопросы и поиск по переписке ` +
+        'работают как работали — они бесплатны.',
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
+  try {
+    const answer = await withChatAction(ctx, 'typing', () => searchWeb(query));
+
+    const sources =
+      answer.sources.length > 0 ? `\n\n**Источники:**\n${answer.sources.map((link) => `• ${link}`).join('\n')}` : '';
+
+    // Режем тем же делителем, что и обычные ответы: он не рвёт блок кода
+    // посередине. Ссылки при этом дописаны уже после обрезки — потерять
+    // их было бы обиднее всего, ради них поиск и затевался.
+    const [first = ''] = splitMarkdown(answer.text);
+    await sendMarkdown(ctx, first + sources);
+
+    if (config.ai.historyLimit > 0) {
+      ctx.session.history.push({ role: 'user', text: query }, { role: 'assistant', text: answer.text });
+      const key = sessionKey(ctx);
+      if (key) rememberMessage(key, { ts: Date.now(), who: 'бот', text: answer.text });
+      ctx.session.history = ctx.session.history.slice(-config.ai.historyLimit);
+    }
+
+    logger.info('Ответ с поиском отправлен', {
+      chars: answer.text.length,
+      sources: answer.sources.length,
+      costUsd: answer.costUsd,
+    });
+  } catch (error) {
+    // Не нашлось, не ответил, кончились деньги на балансе — слот нормы
+    // возвращаем: она про потраченное, а не про попытки.
+    await webQuota.release(userId);
+    await replyWithError(ctx, error);
+  }
 }
 
 /**
