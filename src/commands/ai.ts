@@ -61,6 +61,7 @@ import { prepareVoice } from '../services/voice.js';
 import { clampDuration, generateTrack, isMusicConfigured, MUSIC_SETUP_HINT } from '../services/goapi-music.js';
 import { isInstrumental, planSong } from '../services/song-prompt.js';
 import { isWebSearchConfigured, searchWeb, WEB_SETUP_HINT } from '../services/openrouter-web.js';
+import { isTavilyConfigured, searchTavily, TAVILY_SETUP_HINT, type WebPage } from '../services/tavily.js';
 import { trackQuota, webQuota } from '../services/daily-quota.js';
 import { handleFile, sendAnswerAsFile, takeAnswerFormat, type AnswerFormat } from './file.js';
 import { MAIN_CHAIN, resolveChain, THINK_CHAIN, VOICE_CHAIN, type ChainInfo } from '../models.js';
@@ -725,22 +726,75 @@ async function handleSearch(ctx: BotContext, query: string): Promise<void> {
 }
 
 /**
+ * Правила для ответа по найденным страницам.
+ *
+ * Свой список источников модели запрещают не из вредности: бот дописывает
+ * собственный, из адресов найденных страниц, и два списка подряд выглядят
+ * поломкой. Ограничение длины здесь же, а не в общем правиле: ответ с поиском
+ * выходит длиннее обычного, а ссылки идут последними и при обрезке
+ * по границе сообщения пропали бы первыми — ради них поиск и затевался.
+ */
+const WEB_ANSWER_RULE = [
+  'Отвечай по найденным страницам, а не по памяти: они свежее того, что ты помнишь.',
+  'Если страницы противоречат друг другу — скажи об этом, а не выбирай молча одну версию.',
+  'Если ответа в них нет, честно скажи, а не придумывай.',
+  'Ответ не длиннее 2000 знаков. Своего списка источников не составляй',
+  'и ссылки в текст не вставляй — их допишет бот.',
+].join(' ');
+
+/** Сегодняшняя дата словами: без неё модель считает «сегодня» днём обучения. */
+function today(): string {
+  return new Intl.DateTimeFormat('ru-RU', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    timeZone: config.webQuota.timezone,
+  }).format(new Date());
+}
+
+/** Складывает найденные страницы в запрос к модели. */
+function buildSearchPrompt(query: string, pages: WebPage[]): string {
+  const found = pages
+    .map((page, index) => `[${index + 1}] ${page.title} — ${page.url}\n${page.content}`)
+    .join('\n\n');
+
+  return `Вопрос: ${query}\n\nСегодня ${today()}. Вот что нашлось в интернете:\n\n${found}`;
+}
+
+/** Готовит приписку со ссылками на источники. */
+function sourcesBlock(links: string[]): string {
+  if (links.length === 0) return '';
+  return `\n\n**Источники:**\n${links.map((link) => `• ${link}`).join('\n')}`;
+}
+
+/** Ссылка Markdown с подписью, обрезанной до разумной длины. */
+function sourceLink(title: string, url: string): string {
+  const short = title.length > 60 ? `${title.slice(0, 57)}…` : title;
+  // Скобки в подписи сломали бы разметку [текст](url) при разборе.
+  return `[${short.replace(/[[\]()]/g, '')}](${url})`;
+}
+
+/**
  * Живой поиск: «/гем !сеть ...».
  *
- * Ищет и отвечает один вызов к OpenRouter: найденное подмешивается в тот же
- * запрос, и модель, которая ищет, она же и пишет ответ (см. services/
- * openrouter-web.ts). Ссылки на источники бот дописывает сам, из ответа API.
+ * Путей два, и первый бесплатный. Tavily — поисковый сервис, а не нейросеть:
+ * он отдаёт страницы, а ответ по ним пишет обычная цепочка Gemini, та же,
+ * что отвечает на любой вопрос. Денег это не стоит вовсе — тратится кредит
+ * из пакета и бесплатная норма Google.
  *
- * Своей цепочки моделей здесь нет и быть не может: цепочка — это про перебор
- * бесплатных норм Gemini, а тут платный вызов к другому поставщику. Отказ
- * поэтому показывается человеку как есть.
+ * Второй путь, платный, — плагин OpenRouter: там поиск и ответ делает один
+ * вызов (см. services/openrouter-web.ts). Он включается сам, когда Tavily
+ * не может: кончились кредиты, отвалился ключ, не нашлось ни одной страницы.
+ * Смысл запаса именно в этом — «!сеть» не должна переставать работать в день,
+ * когда закончится бесплатный пакет.
  *
- * Ответ уходит в историю раздела наравне с обычными: «а поподробнее?» после
- * поиска — совершенно естественное продолжение разговора.
+ * Порядок обратный привычному: обычно запасной путь дешевле основного,
+ * а здесь наоборот, и это правильно — платить надо тогда, когда бесплатное
+ * кончилось, а не наоборот.
  */
 async function handleWeb(ctx: BotContext, query: string): Promise<void> {
-  if (!isWebSearchConfigured()) {
-    await ctx.reply(`🔌 Живой поиск не подключён. ${WEB_SETUP_HINT}`);
+  if (!isTavilyConfigured() && !isWebSearchConfigured()) {
+    await ctx.reply(`🔌 Живой поиск не подключён. ${TAVILY_SETUP_HINT}`);
     return;
   }
 
@@ -749,10 +803,8 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
       'Напишите, что узнать в интернете:\n' +
         '<code>/гем !сеть что нового про Gemini 3</code>\n' +
         '<code>/гем !сеть какая погода в Москве</code>\n\n' +
-        'Это поиск по интернету, и он платный — ' +
-        `${config.webQuota.perUserPerDay} запросов в день на человека. ` +
-        'Поиск по нашей же переписке бесплатен и делается другой командой: ' +
-        '<code>/гем !найди …</code>',
+        `Норма — ${config.webQuota.perUserPerDay} поисков в день на человека. ` +
+        'Поиск по нашей же переписке — другая команда: <code>/гем !найди …</code>',
       { parse_mode: 'HTML' },
     );
     return;
@@ -763,7 +815,7 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
 
   if (!quota.allowed) {
     await ctx.reply(
-      `🚫 На сегодня поиски закончились: ${quota.limit} в день на человека — каждый стоит денег.\n\n` +
+      `🚫 На сегодня поиски закончились: ${quota.limit} в день на человека.\n\n` +
         `Норма обновится через ${quota.resetsIn}. Обычные вопросы и поиск по переписке ` +
         'работают как работали — они бесплатны.',
       { parse_mode: 'HTML' },
@@ -772,35 +824,127 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
   }
 
   try {
-    const answer = await withChatAction(ctx, 'typing', () => searchWeb(query));
+    const answered = await withChatAction(ctx, 'typing', async () => {
+      const viaTavily = await searchWithTavily(ctx, query);
+      // Сюда добираемся, только если бесплатный путь не справился — значит
+      // и пометку о платном пути показывать есть за что.
+      return viaTavily ?? (await searchWithOpenRouter(ctx, query, isTavilyConfigured()));
+    });
 
-    const sources =
-      answer.sources.length > 0 ? `\n\n**Источники:**\n${answer.sources.map((link) => `• ${link}`).join('\n')}` : '';
-
-    // Режем тем же делителем, что и обычные ответы: он не рвёт блок кода
-    // посередине. Ссылки при этом дописаны уже после обрезки — потерять
-    // их было бы обиднее всего, ради них поиск и затевался.
-    const [first = ''] = splitMarkdown(answer.text);
-    await sendMarkdown(ctx, first + sources);
-
-    if (config.ai.historyLimit > 0) {
-      ctx.session.history.push({ role: 'user', text: query }, { role: 'assistant', text: answer.text });
-      const key = sessionKey(ctx);
-      if (key) rememberMessage(key, { ts: Date.now(), who: 'бот', text: answer.text });
-      ctx.session.history = ctx.session.history.slice(-config.ai.historyLimit);
+    // Ответить не вышло ни одним путём — ни нашлось ничего, ни платный
+    // не настроен. Слот нормы возвращаем: она про полученные ответы.
+    if (answered === null) {
+      await webQuota.release(userId);
+      return;
     }
 
-    logger.info('Ответ с поиском отправлен', {
-      chars: answer.text.length,
-      sources: answer.sources.length,
-      costUsd: answer.costUsd,
-    });
+    if (config.ai.historyLimit > 0) {
+      ctx.session.history.push({ role: 'user', text: query }, { role: 'assistant', text: answered });
+      const key = sessionKey(ctx);
+      if (key) rememberMessage(key, { ts: Date.now(), who: 'бот', text: answered });
+      ctx.session.history = ctx.session.history.slice(-config.ai.historyLimit);
+    }
   } catch (error) {
-    // Не нашлось, не ответил, кончились деньги на балансе — слот нормы
-    // возвращаем: она про потраченное, а не про попытки.
+    // Норма — про потраченное, а не про попытки: неудачный поиск слот вернёт.
     await webQuota.release(userId);
     await replyWithError(ctx, error);
   }
+}
+
+/**
+ * Бесплатный путь: страницы от Tavily, ответ от Gemini.
+ *
+ * Возвращает null, если этим путём ответить не вышло, — тогда вызывающий код
+ * берёт платный. Отказ Tavily здесь именно проглатывается, а не показывается:
+ * человеку незачем знать, что первый поисковик не ответил, если второй ответил.
+ */
+async function searchWithTavily(ctx: BotContext, query: string): Promise<string | null> {
+  if (!isTavilyConfigured()) return null;
+
+  let pages: WebPage[];
+  try {
+    pages = await searchTavily(query);
+  } catch (error) {
+    // Дальше пробуем платный путь — но только если он вообще настроен.
+    // Иначе честнее показать настоящую причину, а не молчать.
+    if (!isWebSearchConfigured()) throw error;
+    logger.warn('Tavily не смог, перехожу на OpenRouter', {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+
+  if (pages.length === 0) {
+    // Пустая выдача — повод попробовать второй поисковик: движки у них
+    // разные, и то, чего не увидел один, вполне находит другой.
+    if (isWebSearchConfigured()) {
+      logger.info('Tavily ничего не нашёл, пробую OpenRouter');
+      return null;
+    }
+
+    await ctx.reply(
+      '🔍 В интернете ничего подходящего не нашлось.\n\n' +
+        '<i>Попробуйте переформулировать — поиск понимает обычные слова, ' +
+        'а не только точные названия.</i>',
+      { parse_mode: 'HTML' },
+    );
+    return null;
+  }
+
+  /**
+   * Провайдер берём молча, а не через requireGemini: тот объясняет человеку,
+   * что Gemini не подключён, — а здесь это не конец дела, а повод перейти
+   * на платный путь, который отвечает и без Gemini. Жаловаться, а потом
+   * всё-таки ответить, было бы странно.
+   */
+  const gemini = findTextProvider(GEMINI_ID);
+  if (!gemini?.isConfigured) {
+    logger.warn('Gemini не подключён, отвечать по найденному нечем — беру OpenRouter');
+    return null;
+  }
+
+  const chain = resolveChain(MAIN_CHAIN);
+  const answer = await generateWithChain(gemini, chain.models, buildSearchPrompt(query, pages), {
+    maxOutputTokens: chain.maxOutputTokens,
+    extraInstruction: `${ONE_POST_RULE} ${WEB_ANSWER_RULE}`,
+  });
+
+  const [first = ''] = splitMarkdown(answer.text);
+  await sendMarkdown(ctx, first + sourcesBlock(pages.slice(0, 5).map((page) => sourceLink(page.title, page.url))));
+
+  logger.info('Ответ с поиском отправлен', { via: 'tavily', model: answer.model, pages: pages.length });
+  return answer.text;
+}
+
+/**
+ * Платный путь: поиск и ответ одним вызовом к OpenRouter.
+ *
+ * Параметр fellBack говорит, что сюда пришли не от хорошей жизни, а потому
+ * что бесплатный Tavily не смог. Тогда под ответом появляется пометка с ценой:
+ * иначе день, когда кончатся бесплатные кредиты, пройдёт незамеченным —
+ * бот продолжит отвечать, просто начнёт брать деньги.
+ */
+async function searchWithOpenRouter(ctx: BotContext, query: string, fellBack = false): Promise<string | null> {
+  if (!isWebSearchConfigured()) {
+    await ctx.reply(`🔌 Живой поиск не подключён. ${WEB_SETUP_HINT}`);
+    return null;
+  }
+
+  const answer = await searchWeb(query);
+  const [first = ''] = splitMarkdown(answer.text);
+  await sendMarkdown(ctx, first + sourcesBlock(answer.sources));
+
+  if (fellBack) {
+    const price = answer.costUsd ? `$${answer.costUsd.toFixed(4)}` : 'платно';
+    await ctx.reply(
+      `<i>Бесплатный поиск не ответил — искал через OpenRouter, ${price}. ` +
+        'Если так теперь каждый раз, значит кончились кредиты Tavily.</i>',
+      { parse_mode: 'HTML' },
+    );
+  }
+
+  logger.info('Ответ с поиском отправлен', { via: 'openrouter', fellBack, costUsd: answer.costUsd });
+  return answer.text;
 }
 
 /**
