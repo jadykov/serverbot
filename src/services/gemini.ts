@@ -149,16 +149,29 @@ const EMOJI_RULES = [
  * Рисование в боте живёт отдельно — командой «/гем !нарисуй», через другого
  * провайдера (см. src/commands/draw.ts). Поэтому модели остаётся сказать, что
  * рисовать она не умеет, и назвать команду, которая умеет.
+ *
+ * Одно исключение появилось у поиска: по «/гем !сеть ...» модели выдаётся
+ * настоящий инструмент, и запрет пришлось сделать выборочным — отсюда
+ * параметр webSearch.
  */
-const NO_TOOLS_RULES = [
-  'Инструментов у тебя нет: ты не умеешь рисовать картинки, искать в интернете и запускать код.',
-  'Никогда не выдавай вместо ответа служебный вызов инструмента —',
-  'ни {"action": ...}, ни {"tool": ...}, ни dalle, ни text2im, ни в каком другом виде.',
-  'Просят нарисовать — одной строкой ответь, что рисование включается командой /гем !нарисуй,',
-  'и не пытайся изобразить картинку текстом.',
-  'Просят переслать сообщение или файл в личные сообщения — это тоже умеет бот, а не ты:',
-  'подскажи ответить командой /гем !личка на нужное сообщение.',
-].join(' ');
+function noToolsRules(webSearch: boolean): string {
+  return [
+    webSearch
+      ? // При включённом поиске прежняя фраза стала бы прямым запретом на то,
+        // ради чего запрос и послан: модель отвечала бы «я не умею искать»,
+        // имея инструмент на руках.
+        'Из инструментов тебе доступен поиск в интернете — пользуйся им, ' +
+        'чтобы отвечать по свежим данным, а не по памяти. Рисовать картинки ' +
+        'и запускать код ты по-прежнему не умеешь.'
+      : 'Инструментов у тебя нет: ты не умеешь рисовать картинки, искать в интернете и запускать код.',
+    'Никогда не выдавай вместо ответа служебный вызов инструмента —',
+    'ни {"action": ...}, ни {"tool": ...}, ни dalle, ни text2im, ни в каком другом виде.',
+    'Просят нарисовать — одной строкой ответь, что рисование включается командой /гем !нарисуй,',
+    'и не пытайся изобразить картинку текстом.',
+    'Просят переслать сообщение или файл в личные сообщения — это тоже умеет бот, а не ты:',
+    'подскажи ответить командой /гем !личка на нужное сообщение.',
+  ].join(' ');
+}
 
 /**
  * Собирает системную инструкцию: роль, правила оформления и добавка на один
@@ -171,8 +184,42 @@ const NO_TOOLS_RULES = [
  * иначе такой вызов начинал бы отвечать таблицами и HTML, которых Telegram
  * не понимает.
  */
-function buildSystemPrompt(custom?: string, extra?: string): string {
-  return [custom?.trim() || DEFAULT_ROLE, MARKUP_RULES, EMOJI_RULES, NO_TOOLS_RULES, extra?.trim() ?? ''].join(' ').trim();
+function buildSystemPrompt(custom?: string, extra?: string, webSearch = false): string {
+  return [custom?.trim() || DEFAULT_ROLE, MARKUP_RULES, EMOJI_RULES, noToolsRules(webSearch), extra?.trim() ?? '']
+    .join(' ')
+    .trim();
+}
+
+/**
+ * Собирает список источников, на которых модель построила ответ.
+ *
+ * Приходит он в groundingMetadata и нужен по существу: живой поиск без ссылок
+ * неотличим от выдумки — проверить, откуда взялась цифра, человеку нечем.
+ * Ссылки при этом ведут не на сам сайт, а на редирект Google: так устроен
+ * grounding, подменять их своими нельзя по условиям использования.
+ *
+ * Ограничиваем пятью: больше в сообщение Telegram всё равно не влезет,
+ * а модель на один вопрос иногда приносит полтора десятка.
+ */
+function collectSources(response: GenerateContentResponse): string[] {
+  const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
+  const seen = new Set<string>();
+  const links: string[] = [];
+
+  for (const chunk of chunks) {
+    const uri = chunk.web?.uri;
+    if (!uri || seen.has(uri)) continue;
+    seen.add(uri);
+
+    // Заголовок у Google — это домен («ria.ru»); если его нет, показываем
+    // сам адрес, но подписью, а не голой ссылкой на редирект.
+    const title = chunk.web?.title?.trim() || 'источник';
+    // Скобки в подписи сломали бы разметку [текст](url) при разборе.
+    links.push(`[${title.replace(/[[\]()]/g, '')}](${uri})`);
+    if (links.length === 5) break;
+  }
+
+  return links;
 }
 
 export class GeminiProvider implements TextProvider {
@@ -244,11 +291,16 @@ export class GeminiProvider implements TextProvider {
           model,
           contents,
           config: {
-            systemInstruction: buildSystemPrompt(options.systemPrompt, options.extraInstruction),
+            systemInstruction: buildSystemPrompt(options.systemPrompt, options.extraInstruction, options.webSearch),
             temperature: options.temperature ?? 0.8,
             maxOutputTokens,
             // Отправляется, только если задан GEMINI_THINKING (см. выше).
             ...(thinkingConfig ? { thinkingConfig } : {}),
+            // Живой поиск. Решает по нему модель сама: инструмент — это
+            // разрешение сходить в интернет, а не приказ делать это всегда.
+            // Модели без поддержки инструментов (вся Gemma) отвечают на такой
+            // запрос 400, поэтому в поисковой цепочке их нет — см. models.ts.
+            ...(options.webSearch ? { tools: [{ googleSearch: {} }] } : {}),
           },
         }),
         config.ai.timeoutMs,
@@ -299,14 +351,22 @@ export class GeminiProvider implements TextProvider {
         );
       }
 
+      // Источники — только при поиске: без него groundingMetadata пуста.
+      const sources = options.webSearch ? collectSources(response) : [];
+
       logger.debug('Gemini: ответ получен', {
         model,
         ms: Date.now() - startedAt,
         chars: text.length,
         attachments: options.attachments?.length ?? 0,
+        ...(options.webSearch ? { sources: sources.length } : {}),
       });
 
-      return text;
+      // Пустой список — не сбой: модель могла решить, что поиск для этого
+      // вопроса не нужен, и ответить по памяти. Тогда и приписки не будет.
+      if (sources.length === 0) return text;
+
+      return `${text}\n\n**Источники:**\n${sources.map((link) => `• ${link}`).join('\n')}`;
     } catch (error) {
       if (error instanceof ProviderRequestError) throw error;
       throw translateGeminiError(this.id, model, error);

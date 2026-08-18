@@ -15,6 +15,7 @@
  *   /гем !скажи <текст>       — ответ голосом;
  *   /гем !трек <описание>     — песня с вокалом (платно);
  *   /гем !найди <что искать>  — поиск по переписке раздела;
+ *   /гем !сеть <вопрос>       — ответ со свежими данными из интернета;
  *   /гем !файл <что сделать>  — ответ отдельным файлом;
  *   /гем !где здесь <предмет> — рамка поверх фотографии;
  *   /гем !расшифруй (реплаем) — послушать голосовое и ответить по существу;
@@ -61,7 +62,7 @@ import { clampDuration, generateTrack, isMusicConfigured, MUSIC_SETUP_HINT } fro
 import { isInstrumental, planSong } from '../services/song-prompt.js';
 import { trackQuota } from '../services/daily-quota.js';
 import { handleFile, sendAnswerAsFile, takeAnswerFormat, type AnswerFormat } from './file.js';
-import { MAIN_CHAIN, resolveChain, THINK_CHAIN, VOICE_CHAIN, type ChainInfo } from '../models.js';
+import { MAIN_CHAIN, resolveChain, THINK_CHAIN, VOICE_CHAIN, WEB_CHAIN, type ChainInfo } from '../models.js';
 import {
   ProviderNotConfiguredError,
   ProviderRequestError,
@@ -155,6 +156,26 @@ const DM_PREFIX = switchWord('личка|лс');
 const SEARCH_PREFIX = switchWord('найди|найти');
 
 /**
+ * Девятое слово-переключатель: «/гем !сеть ...» — ответ со свежими данными
+ * из интернета.
+ *
+ * Соседствует с «!найди» не случайно, и путать их не надо: «!найди» ищет
+ * по переписке раздела, «!сеть» — по интернету. Отсюда и слово: «поиск»
+ * годилось бы обоим, а «сеть» ни с чем не спутаешь.
+ *
+ * Поиск включается словом, а не идёт по каждому вопросу, по двум причинам.
+ * Первая — норма: запросов с поиском бесплатно 5000 в месяц, а обычных
+ * у одной только Gemma на порядки больше. Вторая важнее: инструментов Gemma
+ * не понимает вовсе, поэтому запрос с поиском уходит другой цепочкой (WEB_CHAIN),
+ * и делать это молча на каждый «привет» — значит без нужды жечь скромную
+ * норму флешей вместо бездонной Gemma.
+ *
+ * «Гугл» принят вторым написанием: слово в такой просьбе приходит в голову
+ * первым, даже когда ищет за нас Gemini.
+ */
+const WEB_PREFIX = switchWord('сеть|интернет|гугл|погугли');
+
+/**
  * Седьмое слово-переключатель: «/гем !расшифруй» реплаем на голосовое.
  *
  * Слово нужно ровно потому, что голосовому нельзя написать подпись: у снимка
@@ -178,7 +199,7 @@ const MEDIA_COMMAND = /^\/(?:гем|gem)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/
  * а чтобы подсказать: человек, привыкший к прежнему синтаксису, иначе решит,
  * что рисование сломалось. Ответ на вопрос он при этом всё равно получит.
  */
-const FORGOTTEN_BANG = /^(?:нарисуй|контекст|скажи|найди|найти|расшифруй|трек|песня)(?:[\s,:.—–-]|$)/i;
+const FORGOTTEN_BANG = /^(?:нарисуй|контекст|скажи|найди|найти|расшифруй|трек|песня|сеть|погугли)(?:[\s,:.—–-]|$)/i;
 
 /**
  * Добавка к инструкции для любого ответа, который идёт в чат.
@@ -192,6 +213,22 @@ const ONE_POST_RULE = [
   'Ответ должен уместиться в одно сообщение Telegram: не длиннее 3000 знаков.',
   'Не обрывай мысль на полуслове — лучше короче, но законченно:',
   'сначала главное, подробности только если остаётся место.',
+].join(' ');
+
+/**
+ * Добавка для ответов с живым поиском.
+ *
+ * Нужна из-за двух привычек модели, которые вместе портят ответ. Первая:
+ * найдя что-то в интернете, она дописывает снизу собственный список ссылок —
+ * и рядом с тем, который приписывает бот, получается два списка подряд.
+ * Вторая: с поиском ответы выходят длиннее обычных, а ссылки идут последними
+ * и при обрезке по границе сообщения пропадают первыми — то есть теряется
+ * ровно то, ради чего поиск и затевался.
+ */
+const WEB_ANSWER_RULE = [
+  'Ответ должен уместиться в 2000 знаков: ссылки на источники бот допишет сам,',
+  'и им нужно место. Своего списка источников не составляй и ссылки в текст не вставляй —',
+  'просто отвечай по сути найденного.',
 ].join(' ');
 
 /** Что спросить у модели, если картинку прислали вообще без подписи. */
@@ -305,6 +342,11 @@ interface AskOptions {
    * файла просят как раз ради длинного разбора.
    */
   asFile?: AnswerFormat;
+  /**
+   * Разрешить модели сходить в интернет: «/гем !сеть ...». Ссылки на источники
+   * провайдер дописывает в конец ответа сам (см. services/gemini.ts).
+   */
+  webSearch?: boolean;
 }
 
 async function askChain(
@@ -313,7 +355,7 @@ async function askChain(
   /** Цепочка целиком: из неё берутся и модели, и потолок ответа. */
   chain: ChainInfo,
   prompt: string,
-  { attachments = [], historyText, asFile }: AskOptions = {},
+  { attachments = [], historyText, asFile, webSearch }: AskOptions = {},
 ): Promise<boolean> {
   /**
    * Всё, что идёт в чат, обязано уместиться в одно сообщение — и обычный
@@ -338,7 +380,8 @@ async function askChain(
         // её моделей), файловый ещё выше — файла просят ради длинного,
         // а для ответа в одно сообщение берётся самый скромный.
         maxOutputTokens: asFile ? config.files.answerMaxOutputTokens : chain.maxOutputTokens,
-        ...(onePost ? { extraInstruction: ONE_POST_RULE } : {}),
+        ...(onePost ? { extraInstruction: webSearch ? `${ONE_POST_RULE} ${WEB_ANSWER_RULE}` : ONE_POST_RULE } : {}),
+        ...(webSearch ? { webSearch: true } : {}),
       }),
     );
 
@@ -464,6 +507,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
     !FILE_PREFIX.test(trimmed) &&
     !SPEAK_PREFIX.test(trimmed) &&
     !SEARCH_PREFIX.test(trimmed) &&
+    !WEB_PREFIX.test(trimmed) &&
     !TRACK_PREFIX.test(trimmed) &&
     !CONTEXT_PREFIX.test(trimmed);
 
@@ -486,6 +530,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
     !FILE_PREFIX.test(trimmed) &&
     !SPEAK_PREFIX.test(trimmed) &&
     !SEARCH_PREFIX.test(trimmed) &&
+    !WEB_PREFIX.test(trimmed) &&
     !TRACK_PREFIX.test(trimmed) &&
     !CONTEXT_PREFIX.test(trimmed);
 
@@ -503,7 +548,8 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
         '<code>/гем !нарисуй кота-космонавта</code> — картинка вместо текста\n' +
         '<code>/гем !скажи привет</code> — ответ голосом\n' +
         '<code>/гем !трек песня про дедлайны</code> — песня с вокалом\n' +
-        '<code>/гем !найди где обсуждали деплой</code> — поиск по переписке\n\n' +
+        '<code>/гем !найди где обсуждали деплой</code> — поиск по переписке\n' +
+        '<code>/гем !сеть что нового про X</code> — поиск в интернете\n\n' +
         'Ещё можно ответить командой <code>/гем</code> на любое сообщение — я возьму его текст, ' +
         'а если это фотография, разберу её.',
       { parse_mode: 'HTML' },
@@ -559,6 +605,12 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   const search = SEARCH_PREFIX.exec(rawPrompt.trim());
   if (search) {
     await handleSearch(ctx, (search[1] ?? '').trim());
+    return;
+  }
+
+  const web = WEB_PREFIX.exec(rawPrompt.trim());
+  if (web) {
+    await handleWeb(ctx, (web[1] ?? '').trim());
     return;
   }
 
@@ -693,6 +745,38 @@ async function handleSearch(ctx: BotContext, query: string): Promise<void> {
   } catch (error) {
     await replyWithError(ctx, error);
   }
+}
+
+/**
+ * Живой поиск: «/гем !сеть ...».
+ *
+ * Отличается от обычного вопроса ровно двумя вещами: цепочка своя (в основной
+ * первой стоит Gemma, а она инструментов не понимает) и модели разрешено
+ * сходить в интернет. Дальше всё как всегда — тот же askChain, та же история
+ * раздела, ответ одним сообщением. Ссылки на источники дописывает провайдер
+ * (см. collectSources в services/gemini.ts).
+ *
+ * Поиском при этом распоряжается модель, а не бот: инструмент — это
+ * разрешение, а не приказ. На «сколько будет два плюс два» она в интернет
+ * не пойдёт и ответит сама, и ссылок под ответом не будет.
+ */
+async function handleWeb(ctx: BotContext, query: string): Promise<void> {
+  if (!query) {
+    await ctx.reply(
+      'Напишите, что узнать в интернете:\n' +
+        '<code>/гем !сеть что нового про Gemini 3</code>\n' +
+        '<code>/гем !сеть какая погода в Москве</code>\n\n' +
+        'Это поиск по интернету. Поиск по нашей же переписке — ' +
+        'другая команда: <code>/гем !найди …</code>',
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
+  const gemini = await requireGemini(ctx);
+  if (!gemini) return;
+
+  await askChain(ctx, gemini, resolveChain(WEB_CHAIN), query, { webSearch: true });
 }
 
 /**

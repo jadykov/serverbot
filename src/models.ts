@@ -15,6 +15,8 @@
  *
  * Третья, голосовая, стоит особняком и задачей не является: это та же
  * основная, из которой вычеркнуты модели, не умеющие слушать (см. ниже).
+ * Четвёртая, поисковая, устроена ровно так же: из неё вычеркнута Gemma,
+ * не понимающая инструментов, а поиск в интернете у Gemini — инструмент.
  *
  * Сами имена моделей лежат в конфигурации и правятся через .env —
  * см. комментарий у config.gemini.chains.
@@ -25,6 +27,7 @@ import { config } from './config.js';
 export const MAIN_CHAIN = 'main';
 export const THINK_CHAIN = 'think';
 export const VOICE_CHAIN = 'voice';
+export const WEB_CHAIN = 'web';
 
 export interface ChainInfo {
   id: string;
@@ -65,6 +68,15 @@ export function listChains(): ChainInfo[] {
       models: config.gemini.chains.voice,
       // Ответ на голосовое идёт в чат обычным сообщением — значит и потолок
       // тот же, что у обычного разговора.
+      maxOutputTokens: config.gemini.maxOutput.main,
+    },
+    {
+      id: WEB_CHAIN,
+      title: 'Поиск',
+      hint: 'Ответ со свежими данными из интернета. Норма — 5000 запросов с поиском в месяц на всю группу.',
+      models: config.gemini.chains.web,
+      // Ответ уходит в чат обычным сообщением, значит и потолок обычный.
+      // Ссылки на источники дописываются уже после модели и в него не входят.
       maxOutputTokens: config.gemini.maxOutput.main,
     },
   ];
