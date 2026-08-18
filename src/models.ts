@@ -15,6 +15,8 @@
  *
  * Третья, голосовая, стоит особняком и задачей не является: это та же
  * основная, из которой вычеркнуты модели, не умеющие слушать (см. ниже).
+ * Четвёртая, поисковая, — снова она же, но с переставленным порядком:
+ * читать найденные страницы Gemma не успевает в таймаут.
  *
  * Сами имена моделей лежат в конфигурации и правятся через .env —
  * см. комментарий у config.gemini.chains.
@@ -25,6 +27,7 @@ import { config } from './config.js';
 export const MAIN_CHAIN = 'main';
 export const THINK_CHAIN = 'think';
 export const VOICE_CHAIN = 'voice';
+export const WEB_CHAIN = 'web';
 
 export interface ChainInfo {
   id: string;
@@ -65,6 +68,14 @@ export function listChains(): ChainInfo[] {
       models: config.gemini.chains.voice,
       // Ответ на голосовое идёт в чат обычным сообщением — значит и потолок
       // тот же, что у обычного разговора.
+      maxOutputTokens: config.gemini.maxOutput.main,
+    },
+    {
+      id: WEB_CHAIN,
+      title: 'Поиск',
+      hint: 'Ответ по найденным в интернете страницам. Та же основная, но Gemma в хвосте: она не успевает прочитать выжимки.',
+      models: config.gemini.chains.web,
+      // Ответ уходит в чат обычным сообщением — и потолок обычный.
       maxOutputTokens: config.gemini.maxOutput.main,
     },
   ];

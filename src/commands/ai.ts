@@ -64,7 +64,7 @@ import { isWebSearchConfigured, searchWeb, WEB_SETUP_HINT } from '../services/op
 import { isTavilyConfigured, searchTavily, TAVILY_SETUP_HINT, type WebPage } from '../services/tavily.js';
 import { trackQuota, webQuota } from '../services/daily-quota.js';
 import { handleFile, sendAnswerAsFile, takeAnswerFormat, type AnswerFormat } from './file.js';
-import { MAIN_CHAIN, resolveChain, THINK_CHAIN, VOICE_CHAIN, type ChainInfo } from '../models.js';
+import { MAIN_CHAIN, resolveChain, THINK_CHAIN, VOICE_CHAIN, WEB_CHAIN, type ChainInfo } from '../models.js';
 import {
   ProviderNotConfiguredError,
   ProviderRequestError,
@@ -903,7 +903,12 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
     return null;
   }
 
-  const chain = resolveChain(MAIN_CHAIN);
+  /**
+   * Цепочка поисковая, а не основная: в основной первой стоит Gemma,
+   * и на выжимках со страниц она не укладывается в таймаут — проверено
+   * на живом боте. Подробности — у config.gemini.chains.web.
+   */
+  const chain = resolveChain(WEB_CHAIN);
   const answer = await generateWithChain(gemini, chain.models, buildSearchPrompt(query, pages), {
     maxOutputTokens: chain.maxOutputTokens,
     extraInstruction: `${ONE_POST_RULE} ${WEB_ANSWER_RULE}`,
