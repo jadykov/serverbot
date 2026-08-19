@@ -63,7 +63,8 @@ import { clampDuration, generateTrack, isMusicConfigured, MUSIC_SETUP_HINT } fro
 import { isInstrumental, planSong } from '../services/song-prompt.js';
 import { isWebSearchConfigured, searchWeb, WEB_SETUP_HINT } from '../services/openrouter-web.js';
 import { isTavilyConfigured, searchTavily, TAVILY_SETUP_HINT, type WebPage } from '../services/tavily.js';
-import { trackQuota, webQuota } from '../services/daily-quota.js';
+import { DEEP_SETUP_HINT, isDeepThinkConfigured, thinkDeeply } from '../services/openrouter-think.js';
+import { deepQuota, trackQuota, webQuota } from '../services/daily-quota.js';
 import { handleFile, sendAnswerAsFile, takeAnswerFormat, type AnswerFormat } from './file.js';
 import { MAIN_CHAIN, resolveChain, THINK_CHAIN, VOICE_CHAIN, WEB_CHAIN, type ChainInfo } from '../models.js';
 import {
@@ -177,6 +178,26 @@ const SEARCH_PREFIX = switchWord('найди|найти');
 const WEB_PREFIX = switchWord('сеть|интернет|гугл|погугли');
 
 /**
+ * Десятое слово-переключатель: «/гем !размысли ...» — один вопрос, много
+ * думанья.
+ *
+ * Не путать с «!контекстом», хотя оба про «подумай получше». «!контекст» —
+ * это разбор внутри разговора: бесплатный Gemini, вся история раздела,
+ * ответ по делу. Здесь наоборот: платная модель, которой дают время думать
+ * перед ответом, и вопрос, нарочно оторванный от переписки — «голый».
+ *
+ * Истории не передают вовсе, и это не экономия ради экономии: у такого
+ * вопроса контекст только мешает — модель начинает отвечать разговору,
+ * а не вопросу. То, что вход при этом дешевеет вдесятеро, приятный побочный
+ * эффект (см. handleDeep).
+ *
+ * «deepseek» принят вторым написанием: команду заказывали под эту модель,
+ * а модель — переменная в .env, и завтра там может стоять другая. Слово
+ * пусть работает в любом случае.
+ */
+const DEEP_PREFIX = switchWord('размысли|подумай|deepseek');
+
+/**
  * Седьмое слово-переключатель: «/гем !расшифруй» реплаем на голосовое.
  *
  * Слово нужно ровно потому, что голосовому нельзя написать подпись: у снимка
@@ -200,7 +221,7 @@ const MEDIA_COMMAND = /^\/(?:гем|gem)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/
  * а чтобы подсказать: человек, привыкший к прежнему синтаксису, иначе решит,
  * что рисование сломалось. Ответ на вопрос он при этом всё равно получит.
  */
-const FORGOTTEN_BANG = /^(?:нарисуй|контекст|скажи|найди|найти|расшифруй|трек|песня|сеть|погугли)(?:[\s,:.—–-]|$)/i;
+const FORGOTTEN_BANG = /^(?:нарисуй|контекст|скажи|найди|найти|расшифруй|трек|песня|сеть|погугли|размысли|подумай)(?:[\s,:.—–-]|$)/i;
 
 /**
  * Добавка к обычному ответу в чат.
@@ -387,6 +408,34 @@ function defaultAnswerFormat(): AnswerFormat {
 }
 
 /**
+ * Отдаёт готовый ответ: одним сообщением, а не влез — целиком .md-файлом.
+ *
+ * Обрезать нечего и незачем: обрывать мысль на полуслове бессмысленно,
+ * а просить человека повторить вопрос с нужным словом — тем более, он его
+ * уже задал. Формат файла по умолчанию из настроек (.md): модель пишет
+ * разметкой, и в Markdown она разметкой и остаётся.
+ *
+ * Влезает ли ответ, считаем тем же делителем, что и обычная отправка:
+ * он умеет не рвать блок кода посередине.
+ */
+async function sendAnswer(ctx: BotContext, text: string, question: string): Promise<void> {
+  const [first = '', ...rest] = splitMarkdown(text);
+
+  if (rest.length === 0) {
+    await sendMarkdown(ctx, first);
+    return;
+  }
+
+  await sendAnswerAsFile(
+    ctx,
+    text,
+    defaultAnswerFormat(),
+    question,
+    'Ответ не влез в сообщение, поэтому приехал файлом — целиком.',
+  );
+}
+
+/**
  * Общий сценарий «вопрос → ответ»: идём по цепочке моделей и отвечаем первым,
  * что получилось. Если ответила не первая модель, дописываем сноску — иначе
  * непонятно, почему ответ вдруг стал другого качества.
@@ -488,28 +537,7 @@ async function askChain(
     if (asFile) {
       await sendAnswerAsFile(ctx, answer.text, asFile, historyText ?? prompt);
     } else {
-      // Влезает ли ответ в сообщение, считаем сами и тем же делителем, что
-      // и обычная отправка: он умеет не рвать блок кода посередине.
-      const [first = '', ...rest] = splitMarkdown(answer.text);
-
-      if (rest.length === 0) {
-        await sendMarkdown(ctx, first);
-      } else {
-        // Не влез — целиком файлом, и не спрашивая: обрезать ответ на
-        // полуслове бессмысленно, а просить человека повторить вопрос
-        // с нужным словом — тем более, он его уже задал.
-        //
-        // Формат по умолчанию из настроек (.md): модель пишет разметкой,
-        // и в Markdown она остаётся разметкой, а не превращается
-        // в звёздочки и решётки.
-        await sendAnswerAsFile(
-          ctx,
-          answer.text,
-          defaultAnswerFormat(),
-          historyText ?? prompt,
-          'Ответ не влез в сообщение, поэтому приехал файлом — целиком.',
-        );
-      }
+      await sendAnswer(ctx, answer.text, historyText ?? prompt);
     }
 
     if (answer.skipped.length > 0) {
@@ -599,6 +627,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
     !SEARCH_PREFIX.test(trimmed) &&
     !WEB_PREFIX.test(trimmed) &&
     !TRACK_PREFIX.test(trimmed) &&
+    !DEEP_PREFIX.test(trimmed) &&
     !CONTEXT_PREFIX.test(trimmed);
 
   if (repliedVoice && ownsVoice) {
@@ -609,7 +638,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   }
 
   const repliedDocument = ctx.message?.reply_to_message?.document;
-  if (repliedDocument && !FILE_PREFIX.test(trimmed)) {
+  if (repliedDocument && !FILE_PREFIX.test(trimmed) && !DEEP_PREFIX.test(trimmed)) {
     await handleDocument(ctx, repliedDocument.file_id, repliedDocument.file_name ?? 'файл', `/гем ${rawPrompt}`);
     return;
   }
@@ -623,6 +652,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
     !SEARCH_PREFIX.test(trimmed) &&
     !WEB_PREFIX.test(trimmed) &&
     !TRACK_PREFIX.test(trimmed) &&
+    !DEEP_PREFIX.test(trimmed) &&
     !CONTEXT_PREFIX.test(trimmed);
 
   if (repliedPhoto && ownsPhoto) {
@@ -640,7 +670,8 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
         '<code>/гем !скажи привет</code> — ответ голосом\n' +
         '<code>/гем !трек песня про дедлайны</code> — песня с вокалом\n' +
         '<code>/гем !найди где обсуждали деплой</code> — поиск по переписке\n' +
-        '<code>/гем !сеть что нового про X</code> — поиск в интернете\n\n' +
+        '<code>/гем !сеть что нового про X</code> — поиск в интернете\n' +
+        '<code>/гем !размысли что такое понимание</code> — долгое размышление\n\n' +
         'Ещё можно ответить командой <code>/гем</code> на любое сообщение — я возьму его текст, ' +
         'а если это фотография, разберу её.',
       { parse_mode: 'HTML' },
@@ -704,6 +735,12 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   const web = WEB_PREFIX.exec(rawPrompt.trim());
   if (web) {
     await handleWeb(ctx, (web[1] ?? '').trim());
+    return;
+  }
+
+  const deep = DEEP_PREFIX.exec(rawPrompt.trim());
+  if (deep) {
+    await handleDeep(ctx, (deep[1] ?? '').trim());
     return;
   }
 
@@ -925,6 +962,83 @@ function sourceLink(title: string, url: string): string {
   const short = title.length > 60 ? `${title.slice(0, 57)}…` : title;
   // Скобки в подписи сломали бы разметку [текст](url) при разборе.
   return `[${short.replace(/[[\]()]/g, '')}](${url})`;
+}
+
+/**
+ * Глубокое размышление: «/гем !размысли ...».
+ *
+ * Отличается от всего остального в боте тремя вещами сразу, и все три
+ * намеренные.
+ *
+ * Первое — истории нет. Вопрос уходит в модель голым: ни переписки раздела,
+ * ни предыдущих ответов. Не ради экономии (хотя вход и дешевеет вдесятеро),
+ * а потому что с контекстом модель начинает отвечать разговору, а не вопросу,
+ * — здесь же просят подумать над самим вопросом.
+ *
+ * Второе — ответ не попадает в историю раздела, только в архив поиска.
+ * По той же причине: это законченный текст сам по себе, а не реплика,
+ * к которой идут «а поподробнее?». Найти его потом «!найди» сможет.
+ *
+ * Третье — платит OpenRouter, а значит есть дневная норма и подпись с ценой.
+ */
+async function handleDeep(ctx: BotContext, question: string): Promise<void> {
+  if (!isDeepThinkConfigured()) {
+    await ctx.reply(`🔌 Размышление не подключено. ${DEEP_SETUP_HINT}`);
+    return;
+  }
+
+  if (!question) {
+    await ctx.reply(
+      'Напишите вопрос, над которым подумать:\n' +
+        '<code>/гем !размысли что значит «понимать» текст</code>\n' +
+        '<code>/гем !размысли стоит ли доверять интуиции в спорах</code>\n\n' +
+        'Вопрос уходит без истории раздела — это разговор с чистого листа, ' +
+        'зато с настоящим размышлением перед ответом. ' +
+        `Платно: ${config.deepQuota.perUserPerDay} в день на человека. ` +
+        'Разбор внутри разговора — это <code>/гем !контекст …</code>, он бесплатный.',
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
+  const userId = ctx.from?.id;
+  const quota = await deepQuota.reserve(userId);
+
+  if (!quota.allowed) {
+    await ctx.reply(
+      `🚫 На сегодня размышления закончились: ${quota.limit} в день на человека.\n\n` +
+        `Норма обновится через ${quota.resetsIn}. Обычные вопросы и <code>!контекст</code> ` +
+        'работают как работали — они бесплатны.',
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
+  try {
+    // Думает модель минуты, а не секунды, — предупреждаем сразу, иначе
+    // молчание в ответ на заданный вопрос читается как поломка.
+    const notice = await ctx.reply('🤔 Думаю над этим — это займёт минуту-другую…');
+
+    const answer = await withChatAction(ctx, 'typing', () => thinkDeeply(question));
+
+    await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
+    await sendAnswer(ctx, answer.text, question);
+
+    const price = typeof answer.costUsd === 'number' ? `$${answer.costUsd.toFixed(3)}` : 'платно';
+    await ctx.reply(
+      `<i>Думала <code>${escapeHtml(answer.model)}</code>, ${Math.round(answer.elapsedMs / 1000)} с, ${price}. ` +
+        `Осталось на сегодня: ${quota.remaining} из ${quota.limit}.</i>`,
+      { parse_mode: 'HTML' },
+    );
+
+    // В архив поиска — да, в историю раздела — нет (см. описание выше).
+    const key = sessionKey(ctx);
+    if (key) rememberMessage(key, { ts: Date.now(), who: 'бот', text: answer.text });
+  } catch (error) {
+    // Норма — про полученные ответы, а не про попытки.
+    await deepQuota.release(userId);
+    await replyWithError(ctx, error);
+  }
 }
 
 /**
