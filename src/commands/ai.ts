@@ -1025,8 +1025,18 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
     await sendAnswer(ctx, answer.text, question);
 
     const price = typeof answer.costUsd === 'number' ? `$${answer.costUsd.toFixed(3)}` : 'платно';
+    // Объём мыслей показываем рядом с потолком, и это не любопытство:
+    // по этой паре и настраиваются DEEP_EFFORT с DEEP_MAX_TOKENS. Упёрлась
+    // в потолок — есть смысл поднимать, потратила треть — незачем.
+    const thoughts =
+      typeof answer.thoughtTokens === 'number'
+        ? `, мыслей ${answer.thoughtTokens.toLocaleString('ru')} из ${Math.round(
+            config.openrouter.deep.maxTokens * 0.8,
+          ).toLocaleString('ru')}`
+        : '';
+
     await ctx.reply(
-      `<i>Думала <code>${escapeHtml(answer.model)}</code>, ${Math.round(answer.elapsedMs / 1000)} с, ${price}. ` +
+      `<i>Думала <code>${escapeHtml(answer.model)}</code>, ${Math.round(answer.elapsedMs / 1000)} с${thoughts}, ${price}. ` +
         `Осталось на сегодня: ${quota.remaining} из ${quota.limit}.</i>`,
       { parse_mode: 'HTML' },
     );

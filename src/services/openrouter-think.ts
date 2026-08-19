@@ -35,8 +35,17 @@ const PROVIDER_ID = 'openrouter';
 /** Ответ chat/completions — берём только то, что нужно. */
 interface ChatResponse {
   choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
-  /** Фактическая стоимость вызова в долларах — её сообщает сам OpenRouter. */
-  usage?: { cost?: number; completion_tokens?: number };
+  usage?: {
+    /** Фактическая стоимость вызова в долларах — её сообщает сам OpenRouter. */
+    cost?: number;
+    completion_tokens?: number;
+    /**
+     * Сколько токенов ушло на невидимые мысли. Единственный способ узнать,
+     * что происходит внутри: сами мысли мы не показываем, а без их объёма
+     * настройка DEEP_EFFORT и DEEP_MAX_TOKENS остаётся гаданием.
+     */
+    completion_tokens_details?: { reasoning_tokens?: number };
+  };
   model?: string;
   error?: { message?: string };
 }
@@ -47,6 +56,13 @@ export interface DeepAnswer {
   /** Кто отвечал: OpenRouter возвращает точное имя, а не то, что просили. */
   model: string;
   costUsd?: number;
+  /**
+   * Сколько токенов модель потратила на размышление. Показывается в подписи
+   * под ответом — по этому числу и настраиваются потолки: если мыслей вышло
+   * втрое меньше разрешённого, поднимать потолок незачем, а если модель
+   * упёрлась в него, есть о чём говорить.
+   */
+  thoughtTokens?: number;
   elapsedMs: number;
 }
 
@@ -190,11 +206,15 @@ export async function thinkDeeply(question: string): Promise<DeepAnswer> {
   }
 
   const elapsedMs = Date.now() - startedAt;
+  const thoughtTokens = data.usage?.completion_tokens_details?.reasoning_tokens;
 
   logger.info('Размышление готово', {
     model: data.model ?? model,
     effort,
+    maxTokens,
     seconds: Math.round(elapsedMs / 1000),
+    thoughtTokens,
+    completionTokens: data.usage?.completion_tokens,
     chars: text.length,
     costUsd: data.usage?.cost,
   });
@@ -203,6 +223,7 @@ export async function thinkDeeply(question: string): Promise<DeepAnswer> {
     text,
     model: data.model ?? model,
     ...(typeof data.usage?.cost === 'number' ? { costUsd: data.usage.cost } : {}),
+    ...(typeof thoughtTokens === 'number' ? { thoughtTokens } : {}),
     elapsedMs,
   };
 }
