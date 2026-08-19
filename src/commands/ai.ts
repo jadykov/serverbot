@@ -379,20 +379,17 @@ interface AskOptions {
    */
   asFile?: AnswerFormat;
   /**
-   * Файл не заказывали, но если ответ не влезет в сообщение — прислать
-   * файлом, а не обрезать.
+   * Ответ длинный по самой задаче — просить о краткости бессмысленно.
    *
-   * Так работает «!контекст», и только он. У обычного вопроса длинный ответ
-   * — обычно недоразумение: человек спросил мимоходом, а получил трактат,
-   * и файл тут был бы навязчивым. У «!контекста» наоборот: за ним идут
-   * с разбором, который в сообщение и не должен влезать, а обрезанный
-   * разбор бесполезен целиком.
+   * Случай пока один: дословная расшифровка голосового. Пятиминутная запись
+   * это несколько тысяч знаков, и «уложись в одно сообщение» заставило бы
+   * модель сокращать ровно то, что сокращать нельзя, — дословную выписку.
+   * Такому ответу не передают ONE_POST_RULE и дают файловый потолок.
    *
-   * Порог — не в токенах, а в том, влезает ли текст в сообщение Telegram:
-   * токены модель не считает, а знаки считает splitMarkdown, и считает
-   * ровно те, что увидит человек.
+   * На то, каким ответ доедет, флаг не влияет: не влезло в сообщение —
+   * приедет файлом, и это общее правило (см. ниже).
    */
-  fileWhenLong?: boolean;
+  longAnswer?: boolean;
 }
 
 async function askChain(
@@ -401,18 +398,18 @@ async function askChain(
   /** Цепочка целиком: из неё берутся и модели, и потолок ответа. */
   chain: ChainInfo,
   prompt: string,
-  { attachments = [], historyText, asFile, fileWhenLong }: AskOptions = {},
+  { attachments = [], historyText, asFile, longAnswer }: AskOptions = {},
 ): Promise<boolean> {
   /**
    * Всё, что идёт в чат, обязано уместиться в одно сообщение — и обычный
-   * вопрос, и «!контекст», и разбор фотографии, и ответ по присланной книге.
-   * Исключение ровно одно: ответ, который уезжает файлом.
+   * вопрос, и разбор фотографии, и ответ по присланной книге. Исключения
+   * два: ответ, который и так уезжает файлом, и ответ, длинный по самой
+   * задаче (см. longAnswer).
    *
-   * Три слоя, потому что одного мало: модель просят быть краткой, потолок
-   * токенов у цепочки скромный, а на выходе всё равно режем — знаки модель
-   * не считает, и обещаниям про длину верить нельзя.
+   * Просьба тут не последний рубеж, а первый: знаки модель не считает,
+   * и обещаниям про длину верить нельзя. Что не влезло — уедет файлом.
    */
-  const onePost = !asFile;
+  const onePost = !asFile && !longAnswer;
   try {
     // Историю передаём укороченной, и это не то же самое, сколько её хранить:
     // в сессии лежит память раздела на дни, а модели нужен разговор, а не архив
@@ -427,7 +424,7 @@ async function askChain(
         // Потолок ответа: у цепочки свой (он упирается в минутную норму
         // её моделей), файловый ещё выше — файла просят ради длинного,
         // а для ответа в одно сообщение берётся самый скромный.
-        maxOutputTokens: asFile ? config.files.answerMaxOutputTokens : chain.maxOutputTokens,
+        maxOutputTokens: asFile || longAnswer ? config.files.answerMaxOutputTokens : chain.maxOutputTokens,
         ...(onePost ? { extraInstruction: ONE_POST_RULE } : {}),
         ...(asFile === 'html' ? { extraInstruction: HTML_FILE_RULE } : {}),
       }),
@@ -450,38 +447,29 @@ async function askChain(
 
     if (asFile) {
       await sendAnswerAsFile(ctx, answer.text, asFile, historyText ?? prompt);
-    } else if (onePost) {
-      // Просьба уложиться в сообщение — не гарантия: модель не считает знаки.
-      // Режем сами, тем же делителем, что и обычную отправку, — он умеет
-      // не рвать блок кода посередине. В историю при этом уходит полный
-      // ответ: обрезка касается только показа.
+    } else {
+      // Влезает ли ответ в сообщение, считаем сами и тем же делителем, что
+      // и обычная отправка: он умеет не рвать блок кода посередине.
       const [first = '', ...rest] = splitMarkdown(answer.text);
 
-      // Не влез и обрезать нельзя — отдаём целиком файлом. Формат по
-      // умолчанию из настроек (.md): модель пишет разметкой, и в Markdown
-      // она остаётся разметкой, а не превращается в звёздочки и решётки.
-      if (rest.length > 0 && fileWhenLong) {
+      if (rest.length === 0) {
+        await sendMarkdown(ctx, first);
+      } else {
+        // Не влез — целиком файлом, и не спрашивая: обрезать ответ на
+        // полуслове бессмысленно, а просить человека повторить вопрос
+        // с нужным словом — тем более, он его уже задал.
+        //
+        // Формат по умолчанию из настроек (.md): модель пишет разметкой,
+        // и в Markdown она остаётся разметкой, а не превращается
+        // в звёздочки и решётки.
         await sendAnswerAsFile(
           ctx,
           answer.text,
           defaultAnswerFormat(),
           historyText ?? prompt,
-          'Ответ не влез в сообщение, поэтому файлом — целиком. Формат можно назвать сразу: «!контекст txt …», «!контекст html …».',
+          'Ответ не влез в сообщение, поэтому приехал файлом — целиком.',
         );
-      } else {
-        await sendMarkdown(ctx, first);
-
-        if (rest.length > 0) {
-          await ctx.reply(
-            '<i>Ответ длиннее одного сообщения и показан не целиком. ' +
-              'Чтобы получить его весь — тем же вопросом, но файлом:</i>\n' +
-              `<code>/гем !контекст md ${escapeHtml((historyText ?? prompt).slice(0, 100))}</code>`,
-            { parse_mode: 'HTML' },
-          );
-        }
       }
-    } else {
-      await sendMarkdown(ctx, answer.text);
     }
 
     if (answer.skipped.length > 0) {
@@ -719,12 +707,9 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   if (!gemini) return;
 
   const chain = think ? resolveChain(THINK_CHAIN) : resolveChain(MAIN_CHAIN);
-  const answered = await askChain(ctx, gemini, chain, prompt, {
-    asFile: fileFormat,
-    // Формат назвали — файл будет в любом случае. Не назвали, но это
-    // «!контекст» — файл будет, только если ответ не влез в сообщение.
-    ...(think && !fileFormat ? { fileWhenLong: true } : {}),
-  });
+  // Формат назвали — файл будет в любом случае. Не назвали — ответ пойдёт
+  // в чат и станет файлом, только если не влезет в сообщение.
+  const answered = await askChain(ctx, gemini, chain, prompt, { asFile: fileFormat });
 
   // Запрос начался со слова-переключателя, но без «!». Отвечаем как на обычный
   // вопрос — человек, скорее всего, его и задавал, — но подсказываем синтаксис:
@@ -1488,9 +1473,6 @@ async function handleDocument(ctx: BotContext, fileId: string, fileName: string,
     await askChain(ctx, gemini, resolveChain(THINK_CHAIN), prompt, {
       attachments: prepared.attachment ? [prepared.attachment] : [],
       historyText: `Прислал файл «${fileName}» (${prepared.tokens.toLocaleString('ru')} токенов). ${question}`,
-      // По той же причине, что и «!контекст»: разбор книги, обрезанный
-      // на середине, бесполезен целиком. Не влез в сообщение — приедет файлом.
-      fileWhenLong: true,
     });
 
     await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
@@ -1531,6 +1513,11 @@ function formatDuration(seconds: number): string {
  * На продолжение разговора этого хватает: о чём шла речь, видно из ответа.
  */
 async function handleVoice(ctx: BotContext, voice: VoiceMessage, question: string): Promise<void> {
+  // Дословная выписка — единственный ответ по голосовому, который обязан быть
+  // длинным: пять минут речи это тысячи знаков, и «покороче» здесь означало бы
+  // «перескажи», то есть ровно не то, о чём попросили.
+  const verbatim = question === VOICE_VERBATIM_TASK;
+
   const gemini = await requireGemini(ctx);
   if (!gemini) return;
 
@@ -1554,7 +1541,8 @@ async function handleVoice(ctx: BotContext, voice: VoiceMessage, question: strin
 
     await askChain(ctx, gemini, resolveChain(VOICE_CHAIN), `${VOICE_RULE}\n\n${question || VOICE_DEFAULT_TASK}`, {
       attachments: [audio],
-      historyText: `Прислал голосовое (${length}).${question ? ` ${question}` : ''}`,
+      historyText: `Прислал голосовое (${length}).${verbatim ? ' Расшифровка.' : question ? ` ${question}` : ''}`,
+      ...(verbatim ? { longAnswer: true } : {}),
     });
   } catch (error) {
     await replyWithError(ctx, error);
