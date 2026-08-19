@@ -169,6 +169,8 @@ export async function sendAnswerAsFile(
   answer: string,
   format: AnswerFormat,
   question: string,
+  /** Приписка под именем файла: зачем он вообще приехал. */
+  note?: string,
 ): Promise<void> {
   const title = question.replace(/\s+/g, ' ').trim().slice(0, 80) || 'Ответ';
 
@@ -179,7 +181,9 @@ export async function sendAnswerAsFile(
         ? markdownToHtmlPage(answer, title)
         : answer.trim();
 
-  await sendFile(ctx, content, makeFileName(question, format), `📄 ${escapeHtml(question.slice(0, 200))}`);
+  const caption = `📄 ${escapeHtml(question.slice(0, 200))}${note ? `\n<i>${escapeHtml(note)}</i>` : ''}`;
+
+  await sendFile(ctx, content, makeFileName(question, format), caption);
 }
 
 /**

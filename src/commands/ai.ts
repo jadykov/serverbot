@@ -325,6 +325,23 @@ function takeHistory(history: ChatMessage[], limit: number): ChatMessage[] {
 }
 
 /**
+ * Формат авто-файла, когда его не назвали.
+ *
+ * Markdown, и это не по привычке: модель пишет разметкой всегда, и в .md
+ * разметка остаётся разметкой — заголовки заголовками, списки списками.
+ * В .txt те же символы превратились бы в мусор (его пришлось бы вычищать,
+ * теряя структуру), а .html читается лучше всех, но весит втрое и правится
+ * хуже. Легче .md здесь нет ничего: это тот же текст, только осмысленный.
+ *
+ * FILE_DEFAULT_FORMAT задаёт и его тоже, но там форматов больше, чем годится
+ * для ответа: код и таблицы — это про «!файл», а не про разбор.
+ */
+function defaultAnswerFormat(): AnswerFormat {
+  const configured = config.files.defaultFormat.toLowerCase();
+  return configured === 'txt' || configured === 'html' ? configured : 'md';
+}
+
+/**
  * Общий сценарий «вопрос → ответ»: идём по цепочке моделей и отвечаем первым,
  * что получилось. Если ответила не первая модель, дописываем сноску — иначе
  * непонятно, почему ответ вдруг стал другого качества.
@@ -344,6 +361,21 @@ interface AskOptions {
    * файла просят как раз ради длинного разбора.
    */
   asFile?: AnswerFormat;
+  /**
+   * Файл не заказывали, но если ответ не влезет в сообщение — прислать
+   * файлом, а не обрезать.
+   *
+   * Так работает «!контекст», и только он. У обычного вопроса длинный ответ
+   * — обычно недоразумение: человек спросил мимоходом, а получил трактат,
+   * и файл тут был бы навязчивым. У «!контекста» наоборот: за ним идут
+   * с разбором, который в сообщение и не должен влезать, а обрезанный
+   * разбор бесполезен целиком.
+   *
+   * Порог — не в токенах, а в том, влезает ли текст в сообщение Telegram:
+   * токены модель не считает, а знаки считает splitMarkdown, и считает
+   * ровно те, что увидит человек.
+   */
+  fileWhenLong?: boolean;
 }
 
 async function askChain(
@@ -352,7 +384,7 @@ async function askChain(
   /** Цепочка целиком: из неё берутся и модели, и потолок ответа. */
   chain: ChainInfo,
   prompt: string,
-  { attachments = [], historyText, asFile }: AskOptions = {},
+  { attachments = [], historyText, asFile, fileWhenLong }: AskOptions = {},
 ): Promise<boolean> {
   /**
    * Всё, что идёт в чат, обязано уместиться в одно сообщение — и обычный
@@ -406,15 +438,29 @@ async function askChain(
       // не рвать блок кода посередине. В историю при этом уходит полный
       // ответ: обрезка касается только показа.
       const [first = '', ...rest] = splitMarkdown(answer.text);
-      await sendMarkdown(ctx, first);
 
-      if (rest.length > 0) {
-        await ctx.reply(
-          '<i>Ответ длиннее одного сообщения и показан не целиком. ' +
-            'Чтобы получить его весь — тем же вопросом, но файлом:</i>\n' +
-            `<code>/гем !контекст md ${escapeHtml((historyText ?? prompt).slice(0, 100))}</code>`,
-          { parse_mode: 'HTML' },
+      // Не влез и обрезать нельзя — отдаём целиком файлом. Формат по
+      // умолчанию из настроек (.md): модель пишет разметкой, и в Markdown
+      // она остаётся разметкой, а не превращается в звёздочки и решётки.
+      if (rest.length > 0 && fileWhenLong) {
+        await sendAnswerAsFile(
+          ctx,
+          answer.text,
+          defaultAnswerFormat(),
+          historyText ?? prompt,
+          'Ответ не влез в сообщение, поэтому файлом — целиком. Формат можно назвать сразу: «!контекст txt …», «!контекст html …».',
         );
+      } else {
+        await sendMarkdown(ctx, first);
+
+        if (rest.length > 0) {
+          await ctx.reply(
+            '<i>Ответ длиннее одного сообщения и показан не целиком. ' +
+              'Чтобы получить его весь — тем же вопросом, но файлом:</i>\n' +
+              `<code>/гем !контекст md ${escapeHtml((historyText ?? prompt).slice(0, 100))}</code>`,
+            { parse_mode: 'HTML' },
+          );
+        }
       }
     } else {
       await sendMarkdown(ctx, answer.text);
@@ -654,7 +700,12 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   if (!gemini) return;
 
   const chain = think ? resolveChain(THINK_CHAIN) : resolveChain(MAIN_CHAIN);
-  const answered = await askChain(ctx, gemini, chain, prompt, { asFile: fileFormat });
+  const answered = await askChain(ctx, gemini, chain, prompt, {
+    asFile: fileFormat,
+    // Формат назвали — файл будет в любом случае. Не назвали, но это
+    // «!контекст» — файл будет, только если ответ не влез в сообщение.
+    ...(think && !fileFormat ? { fileWhenLong: true } : {}),
+  });
 
   // Запрос начался со слова-переключателя, но без «!». Отвечаем как на обычный
   // вопрос — человек, скорее всего, его и задавал, — но подсказываем синтаксис:
