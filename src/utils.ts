@@ -1,6 +1,7 @@
 /**
  * Мелкие утилиты, которые нужны в нескольких местах проекта.
  */
+import { config } from './config.js';
 import type { BotContext } from './types.js';
 
 /**
@@ -96,4 +97,20 @@ export function detectImageMime(buffer: Buffer): string {
   if (buffer.length >= 8 && buffer[0] === 0x89 && buffer[1] === 0x50) return 'image/png';
   if (buffer.length >= 12 && buffer.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
   return 'application/octet-stream';
+}
+
+/**
+ * Сегодняшняя дата словами: «19 августа 2026».
+ *
+ * Нужна везде, где модель должна понимать, что «сегодня» — это сегодня,
+ * а не день её обучения. Без этого свежие данные она датирует прошлым годом,
+ * а «сколько лет прошло с…» считает от своей границы знаний.
+ */
+export function today(): string {
+  return new Intl.DateTimeFormat('ru-RU', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    timeZone: config.webQuota.timezone,
+  }).format(new Date());
 }

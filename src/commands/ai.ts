@@ -50,7 +50,7 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { findTextProvider } from '../services/registry.js';
 import { escapeHtml, markdownToTelegramHtml, MESSAGE_LIMIT, splitMarkdown } from '../format.js';
-import { sessionKey, withChatAction } from '../utils.js';
+import { sessionKey, today, withChatAction } from '../utils.js';
 import { collectAlbumPart, downloadAttachment, pickPhotoFileId } from '../media.js';
 import { generateWithChain } from '../services/chain.js';
 import { startDraw } from './draw.js';
@@ -917,16 +917,6 @@ const WEB_ANSWER_RULE = [
   'Своего списка источников не составляй и ссылки в текст не вставляй — их допишет бот.',
 ].join(' ');
 
-/** Сегодняшняя дата словами: без неё модель считает «сегодня» днём обучения. */
-function today(): string {
-  return new Intl.DateTimeFormat('ru-RU', {
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-    timeZone: config.webQuota.timezone,
-  }).format(new Date());
-}
-
 /** Складывает найденные страницы в запрос к модели. */
 function buildSearchPrompt(query: string, pages: WebPage[]): string {
   const found = pages
@@ -957,11 +947,15 @@ async function sendWebAnswer(ctx: BotContext, text: string, links: string[]): Pr
   await sendMarkdown(ctx, first + sources);
 }
 
+/** Заголовок страницы, обрезанный до разумной для ссылки длины. */
+function shortTitle(title: string): string {
+  return title.length > 60 ? `${title.slice(0, 57)}…` : title;
+}
+
 /** Ссылка Markdown с подписью, обрезанной до разумной длины. */
 function sourceLink(title: string, url: string): string {
-  const short = title.length > 60 ? `${title.slice(0, 57)}…` : title;
   // Скобки в подписи сломали бы разметку [текст](url) при разборе.
-  return `[${short.replace(/[[\]()]/g, '')}](${url})`;
+  return `[${shortTitle(title).replace(/[[\]()]/g, '')}](${url})`;
 }
 
 /**
@@ -980,6 +974,12 @@ function sourceLink(title: string, url: string): string {
  * к которой идут «а поподробнее?». Найти его потом «!найди» сможет.
  *
  * Третье — платит OpenRouter, а значит есть дневная норма и подпись с ценой.
+ *
+ * И перед самим размышлением бот идёт в Tavily за свежими страницами: знания
+ * модели кончаются задолго до сегодня, а глубокое рассуждение по устаревшим
+ * фактам глубоко и бесполезно разом. Поиск не удался — думаем по памяти,
+ * это не повод отменять ответ; в подписи тогда честно сказано, что фактов
+ * со стороны не было.
  */
 async function handleDeep(ctx: BotContext, question: string): Promise<void> {
   if (!isDeepThinkConfigured()) {
@@ -1017,9 +1017,21 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
   try {
     // Думает модель минуты, а не секунды, — предупреждаем сразу, иначе
     // молчание в ответ на заданный вопрос читается как поломка.
-    const notice = await ctx.reply('🤔 Думаю над этим — это займёт минуту-другую…');
+    const notice = await ctx.reply('🤔 Смотрю, что есть по теме, и думаю — это займёт минуту-другую…');
 
-    const answer = await withChatAction(ctx, 'typing', () => thinkDeeply(question));
+    // Свежие страницы: не нашлись или Tavily отказал — не беда, думаем
+    // по памяти. Ради фактов отменять размышление было бы странно.
+    const wanted = config.openrouter.deep.search && isTavilyConfigured();
+    const pages: WebPage[] = wanted
+      ? await searchTavily(question).catch((error) => {
+          logger.warn('Свежих страниц к размышлению не будет', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return [];
+        })
+      : [];
+
+    const answer = await withChatAction(ctx, 'typing', () => thinkDeeply(question, pages));
 
     await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
     await sendAnswer(ctx, answer.text, question);
@@ -1035,10 +1047,24 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
           ).toLocaleString('ru')}`
         : '';
 
+    // Источники — ссылками под ответом, как у «!сети». Ответ мог уехать
+    // файлом, а ссылки нужны в чате, поэтому они в подписи, а не в тексте.
+    // Разметка здесь своя, HTML: подпись — служебная строка, и гонять её
+    // через markdown-конвертер незачем.
+    const sources =
+      pages.length > 0
+        ? '\n\n<b>Смотрел:</b>\n' +
+          pages
+            .slice(0, 5)
+            .map((page) => `• <a href="${escapeHtml(page.url)}">${escapeHtml(shortTitle(page.title))}</a>`)
+            .join('\n')
+        : '';
+    const grounded = pages.length > 0 ? `, страниц ${pages.length}` : ', без свежих страниц';
+
     await ctx.reply(
-      `<i>Думала <code>${escapeHtml(answer.model)}</code>, ${Math.round(answer.elapsedMs / 1000)} с${thoughts}, ${price}. ` +
-        `Осталось на сегодня: ${quota.remaining} из ${quota.limit}.</i>`,
-      { parse_mode: 'HTML' },
+      `<i>Думала <code>${escapeHtml(answer.model)}</code>, ${Math.round(answer.elapsedMs / 1000)} с${thoughts}${grounded}, ${price}. ` +
+        `Осталось на сегодня: ${quota.remaining} из ${quota.limit}.</i>${sources}`,
+      { parse_mode: 'HTML', link_preview_options: { is_disabled: true } },
     );
 
     // В архив поиска — да, в историю раздела — нет (см. описание выше).
