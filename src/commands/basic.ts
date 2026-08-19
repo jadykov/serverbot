@@ -121,6 +121,110 @@ const HELP_TEXT = [
 ].join('\n');
 
 /**
+ * Потолок одного сообщения справки.
+ *
+ * У Telegram это 4096 знаков, и здесь можно брать почти вплотную: справка
+ * уже написана HTML-ом, а теги в лимит не входят — считаем мы строку целиком,
+ * то есть с запасом в свою же пользу. Это не MESSAGE_LIMIT: тот скромнее
+ * ровно потому, что там разметка ещё превратится в теги и текст подрастёт.
+ */
+const HELP_LIMIT = 4000;
+
+/**
+ * Делит справку на неделимые куски: раздел или свёрнутая цитата целиком.
+ *
+ * Цитата неделима не из эстетики: разорванный <blockquote> — это незакрытый
+ * тег, то есть Telegram откажет в разметке и справки не будет вовсе.
+ */
+function helpUnits(text: string): string[] {
+  const units: string[] = [];
+  let quote: string[] = [];
+
+  for (const block of text.split('\n\n')) {
+    if (quote.length > 0) {
+      quote.push(block);
+      if (block.includes('</blockquote>')) {
+        units.push(quote.join('\n\n'));
+        quote = [];
+      }
+      continue;
+    }
+
+    if (block.includes('<blockquote') && !block.includes('</blockquote>')) {
+      quote = [block];
+      continue;
+    }
+
+    units.push(block);
+  }
+
+  // Цитату забыли закрыть — отдаём как есть: чинить разметку не наше дело,
+  // а потерять кусок справки хуже.
+  if (quote.length > 0) units.push(quote.join('\n\n'));
+
+  return units;
+}
+
+/**
+ * Разрезает одну слишком длинную цитату, повторяя её открывающий тег.
+ *
+ * Случай запасной: сегодня самая большая цитата — 3400 знаков из 4000,
+ * но справка растёт с каждой командой, и однажды перерастёт. Пусть тогда
+ * приедет двумя цитатами, а не ошибкой.
+ */
+function splitQuote(unit: string, limit: number): string[] {
+  const open = /^<blockquote[^>]*>/.exec(unit)?.[0];
+  if (!open || !unit.endsWith('</blockquote>')) return [unit];
+
+  const inner = unit.slice(open.length, -'</blockquote>'.length);
+  const room = limit - open.length - '</blockquote>'.length;
+  const parts: string[] = [];
+  let current: string[] = [];
+
+  for (const block of inner.split('\n\n')) {
+    if (current.length > 0 && current.join('\n\n').length + block.length + 2 > room) {
+      parts.push(`${open}${current.join('\n\n')}</blockquote>`);
+      current = [];
+    }
+    current.push(block);
+  }
+  if (current.length > 0) parts.push(`${open}${current.join('\n\n')}</blockquote>`);
+
+  return parts;
+}
+
+/**
+ * Режет справку на сообщения.
+ *
+ * Понадобилось это не от любви к делению: справка растёт с каждой новой
+ * командой и однажды перестала влезать в сообщение. Telegram на это отвечает
+ * «message is too long» — то есть /help не укоротился, а перестал приходить
+ * вовсе, целиком. Теперь длину считают, а не надеются на неё.
+ *
+ * Куски набираются жадно: сколько разделов влезло в сообщение, столько
+ * и уехало. Обычно получается два — главное и подробности.
+ */
+function splitHelp(text: string, limit = HELP_LIMIT): string[] {
+  const parts: string[] = [];
+  let current: string[] = [];
+
+  const flush = (): void => {
+    if (current.length > 0) parts.push(current.join('\n\n'));
+    current = [];
+  };
+
+  for (const unit of helpUnits(text)) {
+    for (const piece of unit.length > limit ? splitQuote(unit, limit) : [unit]) {
+      if (current.length > 0 && current.join('\n\n').length + piece.length + 2 > limit) flush();
+      current.push(piece);
+    }
+  }
+
+  flush();
+  return parts.filter((part) => part.trim().length > 0);
+}
+
+/**
  * Отправляет справку, а если клиент споткнулся о разметку — то же самое
  * обычной цитатой.
  *
@@ -129,8 +233,14 @@ const HELP_TEXT = [
  * Остаться из-за этого совсем без справки было бы обиднее всего.
  */
 async function sendHelp(ctx: BotContext, prefix = ''): Promise<void> {
+  const send = async (text: string): Promise<void> => {
+    for (const part of splitHelp(text)) {
+      await ctx.reply(part, { parse_mode: 'HTML' });
+    }
+  };
+
   try {
-    await ctx.reply(prefix + HELP_TEXT, { parse_mode: 'HTML' });
+    await send(prefix + HELP_TEXT);
   } catch (error) {
     const isMarkupError =
       error instanceof GrammyError && /parse entities|unsupported start tag|can't find end/i.test(error.description);
@@ -140,7 +250,7 @@ async function sendHelp(ctx: BotContext, prefix = ''): Promise<void> {
     logger.warn('Telegram не принял свёрнутые цитаты в справке, отправляю обычными', {
       description: error instanceof GrammyError ? error.description : '',
     });
-    await ctx.reply(prefix + HELP_TEXT.replace(/<blockquote expandable>/g, '<blockquote>'), { parse_mode: 'HTML' });
+    await send(prefix + HELP_TEXT.replace(/<blockquote expandable>/g, '<blockquote>'));
   }
 }
 
