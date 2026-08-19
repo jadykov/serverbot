@@ -49,7 +49,7 @@ import { GrammyError, InputFile, type Bot } from 'grammy';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { findTextProvider } from '../services/registry.js';
-import { escapeHtml, markdownToTelegramHtml, splitMarkdown } from '../format.js';
+import { escapeHtml, markdownToTelegramHtml, MESSAGE_LIMIT, splitMarkdown } from '../format.js';
 import { sessionKey, withChatAction } from '../utils.js';
 import { collectAlbumPart, downloadAttachment, pickPhotoFileId } from '../media.js';
 import { generateWithChain } from '../services/chain.js';
@@ -806,18 +806,33 @@ async function handleSearch(ctx: BotContext, query: string): Promise<void> {
 /**
  * Правила для ответа по найденным страницам.
  *
+ * Здесь единственное место, где от модели просят не краткости, а полноты,
+ * и общее правило одного сообщения сюда не передают вовсе. Причина простая:
+ * поиск — единственная команда с исчерпаемым запасом (кредиты Tavily, а когда
+ * они кончатся — деньги на OpenRouter), и десять страниц, вычитанных ради
+ * трёх строк ответа, — это выброшенный поиск. Раз уж за него заплачено,
+ * пусть человек получит всё, что в найденном было.
+ *
+ * Потолок при этом остаётся: сообщение Telegram. Ответ метит почти в него,
+ * а не за него, — файлом «!сеть» не уезжает, потому что под ответом идут
+ * ссылки на источники, и в файле они теряются.
+ *
  * Свой список источников модели запрещают не из вредности: бот дописывает
  * собственный, из адресов найденных страниц, и два списка подряд выглядят
- * поломкой. Ограничение длины здесь же, а не в общем правиле: ответ с поиском
- * выходит длиннее обычного, а ссылки идут последними и при обрезке
- * по границе сообщения пропали бы первыми — ради них поиск и затевался.
+ * поломкой.
  */
 const WEB_ANSWER_RULE = [
   'Отвечай по найденным страницам, а не по памяти: они свежее того, что ты помнишь.',
+  'Отвечай подробно и по делу: 2300–2700 знаков — это почти целое сообщение Telegram,',
+  'остаток занимает список источников, который допишет бот. Больше не пиши: лишнее не покажется.',
+  'Начни с прямого ответа на вопрос в двух-трёх строках, дальше — подробности.',
+  'Выжми из найденного всю конкретику: числа, даты, названия, имена, цены, версии, условия —',
+  'то, ради чего и лезли в интернет. Общие слова, которые можно было написать не ища, не нужны.',
+  'Подробности разложи короткими абзацами или списком: сплошной простынёй такой объём не читается.',
   'Если страницы противоречат друг другу — скажи об этом, а не выбирай молча одну версию.',
-  'Если ответа в них нет, честно скажи, а не придумывай.',
-  'Ответ не длиннее 2000 знаков. Своего списка источников не составляй',
-  'и ссылки в текст не вставляй — их допишет бот.',
+  'Если ответа в них нет, честно скажи, а не придумывай и не добирай объём водой:',
+  'лучше короткий честный ответ, чем длинный выдуманный.',
+  'Своего списка источников не составляй и ссылки в текст не вставляй — их допишет бот.',
 ].join(' ');
 
 /** Сегодняшняя дата словами: без неё модель считает «сегодня» днём обучения. */
@@ -843,6 +858,21 @@ function buildSearchPrompt(query: string, pages: WebPage[]): string {
 function sourcesBlock(links: string[]): string {
   if (links.length === 0) return '';
   return `\n\n**Источники:**\n${links.map((link) => `• ${link}`).join('\n')}`;
+}
+
+/**
+ * Отправляет ответ поиска вместе со ссылками — ровно одним сообщением.
+ *
+ * Место под ссылки считается заранее и вычитается из лимита: они идут
+ * последними, и при обрезке по границе сообщения пропали бы первыми — а ради
+ * них поиск и затевался. Ответ метит под самое сообщение, так что запас
+ * «как-нибудь влезет» тут больше не работает.
+ */
+async function sendWebAnswer(ctx: BotContext, text: string, links: string[]): Promise<void> {
+  const sources = sourcesBlock(links);
+  const [first = ''] = splitMarkdown(text, MESSAGE_LIMIT - sources.length);
+
+  await sendMarkdown(ctx, first + sources);
 }
 
 /** Ссылка Markdown с подписью, обрезанной до разумной длины. */
@@ -988,12 +1018,15 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
    */
   const chain = resolveChain(WEB_CHAIN);
   const answer = await generateWithChain(gemini, chain.models, buildSearchPrompt(query, pages), {
+    // Потолок у цепочки свой и выше обычного: ответ метит под целое
+    // сообщение, а не под «покороче». ONE_POST_RULE сюда не передают —
+    // о длине с моделью договаривается WEB_ANSWER_RULE, и договаривается
+    // ровно наоборот.
     maxOutputTokens: chain.maxOutputTokens,
-    extraInstruction: `${ONE_POST_RULE} ${WEB_ANSWER_RULE}`,
+    extraInstruction: WEB_ANSWER_RULE,
   });
 
-  const [first = ''] = splitMarkdown(answer.text);
-  await sendMarkdown(ctx, first + sourcesBlock(pages.slice(0, 5).map((page) => sourceLink(page.title, page.url))));
+  await sendWebAnswer(ctx, answer.text, pages.slice(0, 5).map((page) => sourceLink(page.title, page.url)));
 
   logger.info('Ответ с поиском отправлен', { via: 'tavily', model: answer.model, pages: pages.length });
   return answer.text;
@@ -1014,8 +1047,7 @@ async function searchWithOpenRouter(ctx: BotContext, query: string, fellBack = f
   }
 
   const answer = await searchWeb(query);
-  const [first = ''] = splitMarkdown(answer.text);
-  await sendMarkdown(ctx, first + sourcesBlock(answer.sources));
+  await sendWebAnswer(ctx, answer.text, answer.sources);
 
   if (fellBack) {
     const price = answer.costUsd ? `$${answer.costUsd.toFixed(4)}` : 'платно';

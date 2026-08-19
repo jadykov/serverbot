@@ -91,14 +91,26 @@ export function markdownToTelegramHtml(markdown: string): string {
 }
 
 /**
+ * Сколько знаков кладём в одно сообщение.
+ *
+ * У Telegram потолок 4096, мы режем по 3500: запас нужен на разметку —
+ * markdownToTelegramHtml разворачивает `код` в <code>код</code>, и текст
+ * по дороге прибавляет в длине.
+ */
+export const MESSAGE_LIMIT = 3500;
+
+/**
  * Режет длинный Markdown на куски под лимит сообщения Telegram (4096 символов).
  *
  * Главная тонкость: нельзя разрывать блок кода — иначе в первом куске
  * останется незакрытая ``` и разметка поедет. Если разрез приходится
  * на середину блока, мы закрываем блок в текущем куске и заново открываем
  * его в следующем.
+ *
+ * Лимит передают, когда часть сообщения занята чем-то ещё: под ответом
+ * поиска идёт список источников, и место под него надо оставить заранее.
  */
-export function splitMarkdown(markdown: string, limit = 3500): string[] {
+export function splitMarkdown(markdown: string, limit = MESSAGE_LIMIT): string[] {
   if (markdown.length <= limit) return [markdown];
 
   const chunks: string[] = [];

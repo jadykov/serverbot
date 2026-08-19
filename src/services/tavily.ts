@@ -2,7 +2,7 @@
  * Поиск в интернете через Tavily.
  *
  * Отличие от OpenRouter принципиальное: Tavily — это поисковый сервис,
- * а не нейросеть. Он возвращает страницы (заголовок, адрес, выжимку),
+ * а не нейросеть. Он возвращает страницы (заголовок, адрес, текст),
  * и на этом его работа кончается. Ответ по найденному пишет обычная
  * бесплатная цепочка Gemini — та же, что отвечает на любой вопрос.
  *
@@ -24,12 +24,15 @@ import { ProviderRequestError } from '../types.js';
 export interface WebPage {
   title: string;
   url: string;
-  /** Выжимка со страницы — по ней и отвечает модель. */
+  /**
+   * Текст страницы, по которому отвечает модель: полный, обрезанный
+   * по config.tavily.pageChars, а если полного не дали — выжимка Tavily.
+   */
   content: string;
 }
 
 interface TavilyResponse {
-  results?: Array<{ title?: string; url?: string; content?: string }>;
+  results?: Array<{ title?: string; url?: string; content?: string; raw_content?: string | null }>;
   error?: string;
   detail?: { error?: string };
 }
@@ -40,6 +43,27 @@ export const TAVILY_SETUP_HINT =
 
 export function isTavilyConfigured(): boolean {
   return config.tavily.apiKey.length > 0;
+}
+
+/**
+ * Текст страницы для модели: полный, если он приехал, иначе выжимка.
+ *
+ * Полный обрезается по config.tavily.pageChars — по границе абзаца, если
+ * она рядом: обрыв на середине фразы модель иногда пытается достроить сама,
+ * а достраивать ей тут нечем. Выжимку не трогаем: она и так короткая.
+ */
+function pageText(snippet: string | undefined, raw: string | null | undefined): string {
+  const short = snippet?.trim() ?? '';
+  const limit = config.tavily.pageChars;
+  const full = limit > 0 ? (raw?.trim() ?? '') : '';
+
+  if (full.length <= short.length) return short;
+  if (full.length <= limit) return full;
+
+  const cut = full.slice(0, limit);
+  const paragraph = cut.lastIndexOf('\n\n');
+
+  return `${paragraph > limit / 2 ? cut.slice(0, paragraph) : cut}…`;
 }
 
 /**
@@ -69,6 +93,10 @@ export async function searchTavily(query: string): Promise<WebPage[]> {
         // бот своим голосом и своей моделью, а лишняя генерация — лишние
         // кредиты. Берём только страницы.
         include_answer: false,
+        // Полный текст страниц. Кредитов не добавляет — платится за поиск,
+        // а не за объём, — зато модели есть из чего писать подробный ответ:
+        // одних выжимок на это не хватает (см. config.tavily.pageChars).
+        ...(config.tavily.pageChars > 0 ? { include_raw_content: true } : {}),
       }),
       signal: AbortSignal.timeout(config.ai.timeoutMs),
     });
@@ -106,17 +134,20 @@ export async function searchTavily(query: string): Promise<WebPage[]> {
   const data = (await response.json()) as TavilyResponse;
 
   const pages: WebPage[] = (data.results ?? [])
-    .filter((item): item is { title?: string; url: string; content?: string } => Boolean(item.url))
+    .filter((item): item is { title?: string; url: string; content?: string; raw_content?: string | null } =>
+      Boolean(item.url),
+    )
     .map((item) => ({
       title: item.title?.trim() || new URL(item.url).hostname.replace(/^www\./, ''),
       url: item.url,
-      content: item.content?.trim() ?? '',
+      content: pageText(item.content, item.raw_content),
     }));
 
   logger.info('Tavily: поиск выполнен', {
     ms: Date.now() - startedAt,
     depth: config.tavily.searchDepth,
     pages: pages.length,
+    chars: pages.reduce((sum, page) => sum + page.content.length, 0),
   });
 
   return pages;

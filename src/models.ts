@@ -85,8 +85,10 @@ export function listChains(): ChainInfo[] {
       title: 'Поиск',
       hint: 'Ответ по найденным в интернете страницам. Та же голова, что у обычной, но резерв длиннее.',
       models: config.gemini.chains.web,
-      // Ответ уходит в чат обычным сообщением — и потолок обычный.
-      maxOutputTokens: config.gemini.maxOutput.main,
+      // Ответ уходит в чат одним сообщением, но метит под всё сообщение
+      // целиком: поиск платный, и коротким ответом его тратить жалко
+      // (см. config.gemini.maxOutput.web).
+      maxOutputTokens: config.gemini.maxOutput.web,
     },
   ];
 }
