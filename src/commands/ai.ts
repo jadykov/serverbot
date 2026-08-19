@@ -1021,9 +1021,17 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
 
     // Свежие страницы: не нашлись или Tavily отказал — не беда, думаем
     // по памяти. Ради фактов отменять размышление было бы странно.
-    const wanted = config.openrouter.deep.search && isTavilyConfigured();
+    // Профиль поиска здесь свой и щедрее, чем у «!сети»: advanced, вдвое
+    // больше страниц, больше текста с каждой (см. config.openrouter.deep).
+    const deep = config.openrouter.deep;
+    const wanted = deep.search && isTavilyConfigured();
     const pages: WebPage[] = wanted
-      ? await searchTavily(question).catch((error) => {
+      ? await searchTavily(question, {
+          depth: deep.searchDepth,
+          maxResults: deep.searchResults,
+          pageChars: deep.searchPageChars,
+          autoParameters: true,
+        }).catch((error) => {
           logger.warn('Свежих страниц к размышлению не будет', {
             error: error instanceof Error ? error.message : String(error),
           });
@@ -1053,7 +1061,7 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
     // через markdown-конвертер незачем.
     const sources =
       pages.length > 0
-        ? '\n\n<b>Смотрел:</b>\n' +
+        ? `\n\n<b>Смотрел${pages.length > 5 ? ` (${pages.length} страниц, вот первые пять)` : ''}:</b>\n` +
           pages
             .slice(0, 5)
             .map((page) => `• <a href="${escapeHtml(page.url)}">${escapeHtml(shortTitle(page.title))}</a>`)

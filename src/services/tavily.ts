@@ -46,15 +46,37 @@ export function isTavilyConfigured(): boolean {
 }
 
 /**
+ * Чем этот поиск отличается от обычного.
+ *
+ * Нужно это ровно одному месту — «!deepseek»: там за размышление платят
+ * рубль-другой, и экономить на материале, по которому оно идёт, глупо.
+ * Обычная «!сеть» остаётся на дешёвом профиле: ей нужен быстрый ответ,
+ * а не разворот темы.
+ */
+export interface SearchOptions {
+  /** basic (1 кредит) или advanced (2 кредита, но выдача заметно точнее). */
+  depth?: string;
+  /** Сколько страниц забрать. Кредитов не добавляет, потолок Tavily — 20. */
+  maxResults?: number;
+  /** Сколько знаков брать с каждой страницы. */
+  pageChars?: number;
+  /**
+   * Дать Tavily самому подобрать настройки под смысл запроса: он умеет
+   * распознать вопрос про новости и сузить выдачу по свежести. Наши
+   * значения при этом остаются главнее — автоматика только дополняет.
+   */
+  autoParameters?: boolean;
+}
+
+/**
  * Текст страницы для модели: полный, если он приехал, иначе выжимка.
  *
  * Полный обрезается по config.tavily.pageChars — по границе абзаца, если
  * она рядом: обрыв на середине фразы модель иногда пытается достроить сама,
  * а достраивать ей тут нечем. Выжимку не трогаем: она и так короткая.
  */
-function pageText(snippet: string | undefined, raw: string | null | undefined): string {
+function pageText(snippet: string | undefined, raw: string | null | undefined, limit: number): string {
   const short = snippet?.trim() ?? '';
-  const limit = config.tavily.pageChars;
   const full = limit > 0 ? (raw?.trim() ?? '') : '';
 
   if (full.length <= short.length) return short;
@@ -70,11 +92,14 @@ function pageText(snippet: string | undefined, raw: string | null | undefined): 
  * Ищет страницы по запросу. Пустой список — это не ошибка, а «ничего
  * не нашлось»: решать, что с этим делать, вызывающему коду.
  */
-export async function searchTavily(query: string): Promise<WebPage[]> {
+export async function searchTavily(query: string, options: SearchOptions = {}): Promise<WebPage[]> {
   if (!isTavilyConfigured()) {
     throw new ProviderRequestError('tavily', TAVILY_SETUP_HINT, { kind: 'auth' });
   }
 
+  const depth = options.depth ?? config.tavily.searchDepth;
+  const maxResults = options.maxResults ?? config.tavily.maxResults;
+  const pageChars = options.pageChars ?? config.tavily.pageChars;
   const startedAt = Date.now();
 
   let response: Response;
@@ -87,8 +112,13 @@ export async function searchTavily(query: string): Promise<WebPage[]> {
       },
       body: JSON.stringify({
         query,
-        max_results: config.tavily.maxResults,
-        search_depth: config.tavily.searchDepth,
+        max_results: maxResults,
+        search_depth: depth,
+        // Больше кусков с каждой страницы: три — это и потолок Tavily,
+        // и его же умолчание, но полагаться на умолчание чужого сервиса
+        // в том, что нам важно, не стоит.
+        chunks_per_source: 3,
+        ...(options.autoParameters ? { auto_parameters: true } : {}),
         // Свой ответ Tavily тоже умеет писать, но он нам не нужен: отвечает
         // бот своим голосом и своей моделью, а лишняя генерация — лишние
         // кредиты. Берём только страницы.
@@ -96,7 +126,7 @@ export async function searchTavily(query: string): Promise<WebPage[]> {
         // Полный текст страниц. Кредитов не добавляет — платится за поиск,
         // а не за объём, — зато модели есть из чего писать подробный ответ:
         // одних выжимок на это не хватает (см. config.tavily.pageChars).
-        ...(config.tavily.pageChars > 0 ? { include_raw_content: true } : {}),
+        ...(pageChars > 0 ? { include_raw_content: true } : {}),
       }),
       signal: AbortSignal.timeout(config.ai.timeoutMs),
     });
@@ -140,12 +170,13 @@ export async function searchTavily(query: string): Promise<WebPage[]> {
     .map((item) => ({
       title: item.title?.trim() || new URL(item.url).hostname.replace(/^www\./, ''),
       url: item.url,
-      content: pageText(item.content, item.raw_content),
+      content: pageText(item.content, item.raw_content, pageChars),
     }));
 
   logger.info('Tavily: поиск выполнен', {
     ms: Date.now() - startedAt,
-    depth: config.tavily.searchDepth,
+    depth,
+    credits: depth === 'advanced' ? 2 : 1,
     pages: pages.length,
     chars: pages.reduce((sum, page) => sum + page.content.length, 0),
   });
