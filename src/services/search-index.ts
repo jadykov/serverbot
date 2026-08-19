@@ -19,7 +19,7 @@
  * Про размер. Вектор хранится не списком чисел в JSON, а base64 от Float32Array:
  * 768 измерений это 3 КБ вместо 15 КБ текстом, и разбирается быстрее.
  */
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { GoogleGenAI } from '@google/genai';
 import { config } from '../config.js';
@@ -225,6 +225,7 @@ async function flush(key: string): Promise<void> {
 
     await mkdir(config.search.dir, { recursive: true });
     await appendFile(archivePath(key), lines + '\n', 'utf8');
+    await trimArchive(key);
 
     logger.debug('Реплики проиндексированы', { key, count: queue.length });
   } catch (error) {
@@ -233,6 +234,59 @@ async function flush(key: string): Promise<void> {
     logger.warn('Не удалось проиндексировать реплики', {
       key,
       count: queue.length,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/**
+ * Средний вес одной записи в архиве. Замерено на живом файле: вектор из 768
+ * измерений занимает 4096 знаков base64, и вместе с текстом реплики выходит
+ * около 4,6 КБ. Число нужно только затем, чтобы не читать файл целиком ради
+ * подсчёта строк: пока он меньше ожидаемого размера, резать точно нечего.
+ */
+const BYTES_PER_RECORD = 5 * 1024;
+
+/**
+ * Не даёт архиву раздела расти бесконечно.
+ *
+ * Проблема не в диске, а в поиске: он читает файл целиком и разбирает каждую
+ * строку — на каждый «!найди». Файл в сотню мегабайт превратил бы поиск
+ * в многосекундную паузу и распухание памяти, а контейнеру отведено 512 МБ.
+ *
+ * Отсюда потолок в записях, а не в днях: старое выбрасывается, свежее живёт.
+ * Проверка дешёвая — сравнение размера файла, — и чтение случается только
+ * тогда, когда резать действительно пора.
+ *
+ * Экспортируется не ради других модулей, а ради проверки: без ключа к Gemini
+ * подрезание иначе не запустить, а оно единственное здесь трогает чужие файлы.
+ */
+export async function trimArchive(key: string): Promise<void> {
+  const limit = config.search.maxRecords;
+  if (limit <= 0) return;
+
+  const file = archivePath(key);
+
+  try {
+    const { size } = await stat(file);
+    if (size <= limit * BYTES_PER_RECORD) return;
+
+    const lines = (await readFile(file, 'utf8')).split('\n').filter((line) => line.trim());
+    if (lines.length <= limit) return;
+
+    const kept = lines.slice(-limit);
+    // Через временный файл и переименование: оборвись процесс на середине,
+    // на диске останется целый прежний архив, а не его половина.
+    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(tmp, kept.join('\n') + '\n', 'utf8');
+    await rename(tmp, file);
+
+    logger.info('Архив поиска подрезан', { key, было: lines.length, стало: kept.length });
+  } catch (error) {
+    // Не срослось — не беда: архив просто останется длинным, а поиск
+    // продолжит работать. Ронять из-за уборки индексацию незачем.
+    logger.warn('Не удалось подрезать архив поиска', {
+      key,
       error: error instanceof Error ? error.message : String(error),
     });
   }

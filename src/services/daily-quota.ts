@@ -129,9 +129,17 @@ function createDailyQuota({ file, what, limit: limitOf, timezone }: QuotaOptions
 
     try {
       await mkdir(path.dirname(quotaFile()), { recursive: true });
-      // Переименование атомарно: оборвись процесс на середине записи,
-      // на диске останется целый предыдущий файл, а не половина нового.
-      const tmp = `${quotaFile()}.tmp`;
+      /**
+       * Переименование атомарно: оборвись процесс на середине записи,
+       * на диске останется целый предыдущий файл, а не половина нового.
+       *
+       * Имя временного файла своё у каждой записи, и это не педантизм.
+       * Два одновременных списания с общим именем писали бы в один файл
+       * вперемешку, а переименовали бы вторым — на диск легла бы каша,
+       * и следующий load() на битом JSON начал бы счёт с нуля, то есть
+       * обнулил бы дневные нормы всей группе.
+       */
+      const tmp = `${quotaFile()}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
       await writeFile(tmp, JSON.stringify(plain), 'utf8');
       await rename(tmp, quotaFile());
     } catch (error) {

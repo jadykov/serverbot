@@ -16,6 +16,7 @@ import { describeError, logger } from './logger.js';
 import { BOT_COMMANDS, createBot } from './bot.js';
 import { createHttpServer, listen } from './server.js';
 import { describeProviders } from './services/registry.js';
+import { flushAll } from './services/search-index.js';
 
 async function main(): Promise<void> {
   assertConfigValid();
@@ -75,6 +76,10 @@ async function main(): Promise<void> {
 
     try {
       if (runner.isRunning()) await runner.stop();
+      // Реплики, не набравшие полную пачку, ждут своей очереди в памяти.
+      // Без этой строчки каждая выкатка тихо теряла бы последние сообщения
+      // каждого раздела: в архив поиска они бы уже не попали никогда.
+      await flushAll();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       logger.info('Остановлено штатно. Пока!');
       process.exit(0);

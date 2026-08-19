@@ -365,8 +365,10 @@ async function askChain(
    */
   const onePost = !asFile;
   try {
-    // Историю передаём укороченной: длинный контекст = дороже и медленнее.
-    const history = takeHistory(ctx.session.history, config.ai.historyLimit);
+    // Историю передаём укороченной, и это не то же самое, сколько её хранить:
+    // в сессии лежит память раздела на дни, а модели нужен разговор, а не архив
+    // (см. config.ai.historySend).
+    const history = takeHistory(ctx.session.history, config.ai.historySend);
 
     // Пока модель думает, показываем «печатает…».
     const answer = await withChatAction(ctx, asFile ? 'upload_document' : 'typing', () =>
@@ -559,8 +561,9 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   if (voiceWord) {
     await ctx.reply(
       '«!расшифруй» работает по голосовому: ответьте этой командой на голосовое сообщение. ' +
-      'Нужна дословная выписка — <code>/гем !расшифруй в текст</code>.\n\n' +
+        'Нужна дословная выписка — <code>/гем !расшифруй в текст</code>.\n\n' +
         'В личке команда и вовсе не нужна — пришлите голосовое, и я отвечу.',
+      { parse_mode: 'HTML' },
     );
     return;
   }
@@ -1193,16 +1196,19 @@ async function handleTrack(ctx: BotContext, request: string): Promise<void> {
     return;
   }
 
-  // Слова показываются сразу, пока пишется музыка: их всё равно захотят прочесть,
-  // а в подпись к аудио они не влезут — у Telegram там 1024 знака.
+  /**
+   * Слова показываются сразу, пока пишется музыка: их всё равно захотят
+   * прочесть, а в подпись к аудио они не влезут — у Telegram там 1024 знака.
+   *
+   * Порядок «сначала обрезать, потом экранировать» существенен. Наоборот
+   * — значит однажды разрезать сущность пополам: «&amp;» превращается
+   * в «&am», Telegram отвечает «can't parse entities», и человек не получает
+   * ни слов, ни трека, хотя слот дневной нормы уже занят.
+   */
+  const lyricsBlock = instrumental ? '<i>Без вокала.</i>' : escapeHtml(plan.lyrics.slice(0, 3000));
+
   const notice = await ctx.reply(
-    [
-      `🎵 <b>${escapeHtml(title)}</b> — пишу…`,
-      '',
-      `<i>${escapeHtml(plan.stylePrompt)}</i>`,
-      '',
-      instrumental ? '<i>Без вокала.</i>' : escapeHtml(plan.lyrics).slice(0, 3000),
-    ].join('\n'),
+    [`🎵 <b>${escapeHtml(title)}</b> — пишу…`, '', `<i>${escapeHtml(plan.stylePrompt)}</i>`, '', lyricsBlock].join('\n'),
     { parse_mode: 'HTML' },
   );
 
@@ -1230,13 +1236,7 @@ async function handleTrack(ctx: BotContext, request: string): Promise<void> {
       .editMessageText(
         notice.chat.id,
         notice.message_id,
-        [
-          `🎵 <b>${escapeHtml(title)}</b>`,
-          '',
-          `<i>${escapeHtml(plan.stylePrompt)}</i>`,
-          '',
-          instrumental ? '<i>Без вокала.</i>' : escapeHtml(plan.lyrics).slice(0, 3000),
-        ].join('\n'),
+        [`🎵 <b>${escapeHtml(title)}</b>`, '', `<i>${escapeHtml(plan.stylePrompt)}</i>`, '', lyricsBlock].join('\n'),
         { parse_mode: 'HTML' },
       )
       .catch(() => undefined);
