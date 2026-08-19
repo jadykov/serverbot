@@ -1469,6 +1469,9 @@ async function handleDocument(ctx: BotContext, fileId: string, fileName: string,
     await askChain(ctx, gemini, resolveChain(THINK_CHAIN), prompt, {
       attachments: prepared.attachment ? [prepared.attachment] : [],
       historyText: `Прислал файл «${fileName}» (${prepared.tokens.toLocaleString('ru')} токенов). ${question}`,
+      // По той же причине, что и «!контекст»: разбор книги, обрезанный
+      // на середине, бесполезен целиком. Не влез в сообщение — приедет файлом.
+      fileWhenLong: true,
     });
 
     await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
