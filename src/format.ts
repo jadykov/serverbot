@@ -214,6 +214,50 @@ function inlineToHtml(source: string): string {
   return text.replace(new RegExp(`${MARK}(\\d+)${MARK}`, 'g'), (_match, index: string) => code[Number(index)] ?? '');
 }
 
+/** Ячейки строки таблицы: крайние палочки лишние, внутренние — границы. */
+function splitTableRow(line: string): string[] {
+  return line.trim().replace(/^\||\|$/g, '').split('|').map((cell) => cell.trim());
+}
+
+/**
+ * Строка-разделитель под шапкой: «|---|:--:|». Без неё палочки в тексте
+ * остаются палочками: одна вертикальная черта посреди абзаца таблицей не
+ * становится.
+ */
+function isTableDivider(line: string | undefined): boolean {
+  if (!line || !line.includes('|')) return false;
+  const cells = splitTableRow(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-+:?$/.test(cell));
+}
+
+/** Выравнивание столбцов из той же строки-разделителя: «:--», «--:», «:-:». */
+function tableAlign(divider: string): (string | null)[] {
+  return splitTableRow(divider).map((cell) => {
+    if (cell.startsWith(':') && cell.endsWith(':')) return 'center';
+    return cell.endsWith(':') ? 'right' : null;
+  });
+}
+
+/** Разобранная таблица в HTML: шапка отдельно, остальное — тело. */
+function tableToHtml(rows: string[][], align: (string | null)[]): string {
+  const cell = (text: string, tag: 'th' | 'td', column: number): string => {
+    const side = align[column];
+    return `<${tag}${side ? ` style="text-align:${side}"` : ''}>${inlineToHtml(text)}</${tag}>`;
+  };
+
+  const [head = [], ...body] = rows;
+  const parts = ['<div class="table-wrap">', '<table>'];
+  parts.push(`<thead><tr>${head.map((text, column) => cell(text, 'th', column)).join('')}</tr></thead>`);
+  if (body.length > 0) {
+    parts.push('<tbody>');
+    for (const row of body) parts.push(`<tr>${row.map((text, column) => cell(text, 'td', column)).join('')}</tr>`);
+    parts.push('</tbody>');
+  }
+  parts.push('</table>', '</div>');
+
+  return parts.join('\n');
+}
+
 /**
  * Стили страницы. Скромные намеренно: файл читают, а не разглядывают.
  *
@@ -242,6 +286,13 @@ pre { background: var(--code-bg); padding: 1rem; border-radius: 8px; overflow-x:
 pre code { background: none; padding: 0; font-size: 0.875rem; }
 blockquote { margin-left: 0; padding: 0.1rem 0 0.1rem 1rem; border-left: 3px solid var(--line); color: var(--muted); }
 hr { border: none; border-top: 1px solid var(--line); margin: 2rem 0; }
+.table-wrap { overflow-x: auto; margin: 0 0 1rem; }
+table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+th, td { border: 1px solid var(--line); padding: 0.45rem 0.7rem; text-align: left; vertical-align: top; }
+th { background: var(--code-bg); font-weight: 600; }
+tbody tr:nth-child(even) td { background: var(--code-bg); }
+figure { margin: 1.5rem 0; text-align: center; }
+figure svg { max-width: 100%; height: auto; }
 .footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.85rem; }
 `.trim();
 
@@ -253,8 +304,11 @@ hr { border: none; border-top: 1px solid var(--line); margin: 2rem 0; }
  * который открывается в браузере и печатается на бумагу.
  *
  * Разбор построчный и намеренно простой: поддержано ровно то, чем пишет
- * модель (заголовки, списки, цитаты, блоки кода, линия), без вложенности
- * и таблиц. Чего не поняли — уедет обычным абзацем, а не сломает страницу.
+ * модель (заголовки, списки, цитаты, таблицы, блоки кода, линия), без
+ * вложенности. Чего не поняли — уедет обычным абзацем, а не сломает страницу.
+ *
+ * Особый случай — блок ```svg: модель кладёт туда готовый график, и он
+ * вставляется рисунком, а не примером кода.
  */
 export function markdownToHtmlPage(markdown: string, title: string): string {
   const lines = markdown.replace(/\r\n/g, '\n').split('\n');
@@ -301,8 +355,17 @@ export function markdownToHtmlPage(markdown: string, title: string): string {
         body.push(lines[index]!);
         index += 1;
       }
+      // Блок ```svg — это не пример кода, а готовый рисунок: график, схема.
+      // Вставляем его как есть, иначе на странице оказалась бы простыня
+      // угловых скобок вместо картинки.
+      const drawing = body.join('\n');
+      if (language.toLowerCase() === 'svg' && /^\s*<svg[\s>]/i.test(drawing)) {
+        html.push(`<figure>${drawing}</figure>`);
+        continue;
+      }
+
       const attribute = language ? ` class="language-${escapeHtml(language)}"` : '';
-      html.push(`<pre><code${attribute}>${escapeHtml(body.join('\n'))}</code></pre>`);
+      html.push(`<pre><code${attribute}>${escapeHtml(drawing)}</code></pre>`);
       continue;
     }
 
@@ -322,6 +385,25 @@ export function markdownToHtmlPage(markdown: string, title: string): string {
     if (/^\s{0,3}(?:-\s*-\s*-|\*\s*\*\s*\*|_\s*_\s*_)[-*_\s]*$/.test(line)) {
       closeAll();
       html.push('<hr>');
+      continue;
+    }
+
+    // Таблица: строка со столбиками и сразу под ней разделитель. Продолжается,
+    // пока идут строки с палочками, — пустая строка или обычный абзац её
+    // закрывают.
+    if (line.includes('|') && isTableDivider(lines[index + 1])) {
+      closeAll();
+      const align = tableAlign(lines[index + 1]!);
+      const rows: string[][] = [splitTableRow(line)];
+
+      index += 2;
+      while (index < lines.length && lines[index]!.trim() && lines[index]!.includes('|')) {
+        rows.push(splitTableRow(lines[index]!));
+        index += 1;
+      }
+      index -= 1; // цикл прибавит свою единицу — иначе съели бы строку после таблицы
+
+      html.push(tableToHtml(rows, align));
       continue;
     }
 
