@@ -65,7 +65,7 @@ import { isInstrumental, planSong } from '../services/song-prompt.js';
 import { isWebSearchConfigured, searchWeb, WEB_SETUP_HINT } from '../services/openrouter-web.js';
 import { isTavilyConfigured, searchTavily, TAVILY_SETUP_HINT, type WebPage } from '../services/tavily.js';
 import { DEEP_SETUP_HINT, deepThoughtBudget, isDeepThinkConfigured, thinkDeeply } from '../services/openrouter-think.js';
-import { deepQuota, resetEveryQuota, trackQuota, webQuota } from '../services/daily-quota.js';
+import { deepQuota, imageQuota, resetEveryQuota, trackQuota, webQuota, type DailyQuota } from '../services/daily-quota.js';
 import { handleFile, sendAnswerAsFile, takeAnswerFormat, type AnswerFormat } from './file.js';
 import { MAIN_CHAIN, resolveChain, THINK_CHAIN, VOICE_CHAIN, WEB_CHAIN, type ChainInfo } from '../models.js';
 import {
@@ -233,6 +233,14 @@ const VOICE_PREFIX = switchWord('расшифруй|послушай');
  *   • реплаем без слов — тому, чьё сообщение процитировали.
  */
 const RESET_PREFIX = switchWord('resetuser');
+
+/**
+ * Служебное слово-переключатель: «/гем !лимиты» — сколько осталось сегодня
+ * от всех четырёх дневных норм разом. Открыто всем, не только админу: это
+ * не инструмент того, кто платит по счёту, а ответ на «а сколько у меня
+ * осталось картинок», который иначе узнают только по факту отказа.
+ */
+const LIMITS_PREFIX = switchWord('лимиты');
 
 /**
  * Та же команда, но в подписи к фотографии: «/гем что здесь написано».
@@ -630,6 +638,12 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   const reset = RESET_PREFIX.exec(trimmed);
   if (reset) {
     await handleResetUser(ctx, reset[1] ?? '');
+    return;
+  }
+
+  // «!лимиты» — тоже служебная и тоже без аргументов, реплай ей не нужен.
+  if (LIMITS_PREFIX.test(trimmed)) {
+    await handleLimits(ctx);
     return;
   }
 
@@ -1391,6 +1405,38 @@ async function handleResetUser(ctx: BotContext, target: string): Promise<void> {
       ? `♻️ Нормы сброшены ${who}: было потрачено ${spent.join(', ')}. Все четыре снова полные.`
       : `♻️ Сбрасывать ${who} было нечего — сегодня ни одна норма не тронута.`,
   );
+}
+
+/**
+ * «/гем !лимиты» — сколько осталось сегодня от всех четырёх дневных норм.
+ *
+ * Порядок — от самой щедрой нормы к самой строгой: поиск в интернете,
+ * размышление, картинки, треки (см. src/config.ts). peek() ничего не тратит,
+ * только подсматривает — этим и отличается от reserve() в остальных
+ * обработчиках.
+ */
+async function handleLimits(ctx: BotContext): Promise<void> {
+  const userId = ctx.from?.id;
+  if (userId === undefined) {
+    await ctx.reply('Не вижу, кто спрашивает, — напишите от своего имени.');
+    return;
+  }
+
+  const items: Array<{ icon: string; label: string; quota: DailyQuota }> = [
+    { icon: '🌐', label: 'Поиск в интернете', quota: webQuota },
+    { icon: '🧠', label: 'Размышление', quota: deepQuota },
+    { icon: '🎨', label: 'Картинки', quota: imageQuota },
+    { icon: '🎵', label: 'Треки', quota: trackQuota },
+  ];
+
+  const rows = await Promise.all(
+    items.map(async ({ icon, label, quota }) => {
+      const peeked = await quota.peek(userId);
+      return `${icon} ${label}: ${peeked ? `${peeked.used}/${peeked.limit}` : 'без нормы'}`;
+    }),
+  );
+
+  await ctx.reply(['📊 <b>Ваши лимиты на сегодня</b>', '', ...rows].join('\n'), { parse_mode: 'HTML' });
 }
 
 /**
