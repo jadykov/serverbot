@@ -246,6 +246,27 @@ const RESET_PREFIX = switchWord('resetuser');
 const LIMITS_PREFIX = switchWord('лимиты');
 
 /**
+ * Служебное слово-переключатель: «/гем !тест ...» — прогон через
+ * OpenAI-совместимый провайдер (services/openai-compatible.ts) в обход всего:
+ * без цепочки Gemini, без истории раздела, без архива поиска и долгой памяти.
+ *
+ * Заведено ровно под один сценарий — проверить, что сторонний OpenAI-совместимый
+ * эндпоинт (свой сервер, локальная модель через ngrok и т.п.) вообще отвечает,
+ * не трогая при этом ничего, чем живёт обычный разговор. Провайдер именно
+ * openai, а не «какой найдётся»: resolveTextProvider тихо откатился бы
+ * на Gemini, если OPENAI_API_KEY не задан, а тут нужна проверка ровно того,
+ * что настроено под OPENAI_*, — молча подменять его нельзя.
+ *
+ * Потолок ответа свой и щедрый (см. config.test.maxOutputTokens) — рассуждающие
+ * модели вроде DeepSeek-R1 тратят токены на размышление до самого ответа,
+ * и на обычном потолке чата рискуют вернуть пустой content, не дойдя до него.
+ *
+ * В /help намеренно нет: это не возможность группы, а инструмент того, кто
+ * поднял свой сервер и хочет его проверить.
+ */
+const TEST_PREFIX = switchWord('тест');
+
+/**
  * Та же команда, но в подписи к фотографии: «/гем что здесь написано».
  * Латинская и кириллическая формы вместе — в подписи Telegram не размечает
  * команды, так что разбираем обе одинаково, обычным текстом.
@@ -690,6 +711,14 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   // «!лимиты» — тоже служебная и тоже без аргументов, реплай ей не нужен.
   if (LIMITS_PREFIX.test(trimmed)) {
     await handleLimits(ctx);
+    return;
+  }
+
+  // «!тест» — тоже сразу: она про проверку стороннего провайдера, а не про
+  // разговор, и ни с чем из того, что дальше (реплаи на фото/голос/файл), не пересекается.
+  const test = TEST_PREFIX.exec(trimmed);
+  if (test) {
+    await handleTest(ctx, (test[1] ?? '').trim());
     return;
   }
 
@@ -1483,6 +1512,49 @@ async function handleLimits(ctx: BotContext): Promise<void> {
   );
 
   await ctx.reply(['📊 <b>Ваши лимиты на сегодня</b>', '', ...rows].join('\n'), { parse_mode: 'HTML' });
+}
+
+/**
+ * «/гем !тест ...» — прогон через OpenAI-совместимый провайдер в обход всего
+ * остального (см. TEST_PREFIX выше). Никакого перебора моделей: провайдер
+ * ровно один, и если он не ответил — значит не ответил, это и есть проверка.
+ */
+async function handleTest(ctx: BotContext, question: string): Promise<void> {
+  if (!question) {
+    await ctx.reply(
+      'Прогон через OpenAI-совместимый провайдер (OPENAI_BASE_URL), в обход цепочки Gemini, ' +
+        'истории и памяти — только сам вопрос и сразу ответ.\n\n' +
+        '<code>/гем !тест сколько будет 2+2</code>',
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
+  const provider = findTextProvider('openai');
+  if (!provider) {
+    await ctx.reply('⚠️ OpenAI-совместимый провайдер не зарегистрирован в боте.');
+    return;
+  }
+  if (!provider.isConfigured) {
+    await ctx.reply(`🔌 Он не настроен.\n\n• ${provider.setupHint}`);
+    return;
+  }
+
+  const startedAt = Date.now();
+  try {
+    const answer = await withChatAction(ctx, 'typing', () =>
+      provider.generateText(question, { maxOutputTokens: config.test.maxOutputTokens }),
+    );
+
+    await sendAnswer(ctx, answer, question);
+    await ctx.reply(
+      `<i>Тестовый провайдер (${escapeHtml(config.openai.baseUrl)}), ${((Date.now() - startedAt) / 1000).toFixed(1)} с. ` +
+        `Без цепочки, без истории раздела — только для проверки.</i>`,
+      { parse_mode: 'HTML' },
+    );
+  } catch (error) {
+    await replyWithError(ctx, error);
+  }
 }
 
 /**
