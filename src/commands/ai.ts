@@ -56,6 +56,8 @@ import { generateWithChain } from '../services/chain.js';
 import { startDraw } from './draw.js';
 import { listVoiceNames, parseVoiceRequest, synthesizeSpeech } from '../services/gemini-tts.js';
 import { rememberMessage, searchMessages } from '../services/search-index.js';
+import { getDigest, noteMessage as noteDigestMessage } from '../services/digest.js';
+import { authorName } from '../middlewares/searchIndex.js';
 import { BOX_COLORS, drawBoxes, findObjects } from '../services/pointing.js';
 import { prepareDocument } from '../services/documents.js';
 import { prepareVoice } from '../services/voice.js';
@@ -529,9 +531,22 @@ async function askChain(
    * файла просят как раз ради того, что в сообщение не помещается.
    */
   const length: AnswerLength = answerLength ?? (asFile ? 'unbounded' : 'byNeed');
+  const key = sessionKey(ctx);
+  const speaker = authorName(ctx);
+  // Долгая память раздела: короткая выжимка, которая помнит и то, что давно
+  // выпало из живой истории ниже (см. src/services/digest.ts). Пустая —
+  // если слияний ещё не было или память выключена.
+  const digestText = key ? await getDigest(key) : '';
   const rules = [
     length === 'byNeed' ? ONE_POST_RULE : length === 'detailed' ? THINK_RULE : undefined,
     asFile === 'html' ? HTML_FILE_RULE : undefined,
+    digestText
+      ? `Вот твоя память о более ранних разговорах этого раздела — используй её, если пригодится, ` +
+        `но не пересказывай целиком и не упоминай, что это «память»: ${digestText}`
+      : undefined,
+    `Сейчас с тобой говорит ${speaker}. Обращайся к людям по именам, которые видишь в истории ` +
+      `разговора и в памяти выше, а не по «вы» безлично — и можешь упомянуть кого-то из них, ` +
+      `если это к месту.`,
   ].filter(Boolean);
   try {
     // Историю передаём укороченной, и это не то же самое, сколько её хранить:
@@ -557,12 +572,22 @@ async function askChain(
       // иначе каждый следующий вопрос тащил бы за собой все прежние вложения.
       // Контекст при этом не теряется — что было на снимке, модель описала
       // в своём же ответе, а он в истории есть.
-      ctx.session.history.push({ role: 'user', text: historyText ?? prompt }, { role: 'assistant', text: answer.text });
-      // Ответы бота идут в архив поиска наравне с репликами людей: в них
-      // половина полезного, что вообще было сказано в разделе. Ссылки на них
-      // не будет — id сообщения станет известен только после отправки.
-      const key = sessionKey(ctx);
-      if (key) rememberMessage(key, { ts: Date.now(), who: 'бот', text: answer.text });
+      //
+      // Реплику человека подписываем именем: в топике на несколько человек
+      // без этого модель не различает, кто именно спросил, и не может
+      // обратиться по имени (см. authorName выше).
+      ctx.session.history.push(
+        { role: 'user', text: `${speaker}: ${historyText ?? prompt}` },
+        { role: 'assistant', text: answer.text },
+      );
+      // Ответы бота идут в архив поиска и в долгую память наравне с репликами
+      // людей: в них половина полезного, что вообще было сказано в разделе.
+      // Ссылки на них не будет — id сообщения станет известен только после
+      // отправки.
+      if (key) {
+        rememberMessage(key, { ts: Date.now(), who: 'бот', text: answer.text });
+        noteDigestMessage(key, 'бот', answer.text);
+      }
       // Держим в памяти только последние N сообщений.
       ctx.session.history = ctx.session.history.slice(-config.ai.historyLimit);
     }

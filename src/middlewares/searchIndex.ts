@@ -15,8 +15,15 @@ import { rememberMessage } from '../services/search-index.js';
 import { sessionKey } from '../utils.js';
 import type { BotContext } from '../types.js';
 
-/** Как подписать реплику в результатах поиска. */
-function authorName(ctx: BotContext): string {
+/**
+ * Как подписать реплику в результатах поиска.
+ *
+ * Общая для всего, что подписывает реплику именем автора: используется
+ * и в архиве поиска, и в долгой памяти (src/services/digest.ts), и в самом
+ * разговоре с моделью (src/commands/ai.ts) — какой бы механизм ни спрашивал,
+ * «кто есть кто» должно определяться одинаково.
+ */
+export function authorName(ctx: BotContext): string {
   const from = ctx.from;
   if (!from) return 'кто-то';
   return from.username ? `@${from.username}` : [from.first_name, from.last_name].filter(Boolean).join(' ') || 'кто-то';

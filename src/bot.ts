@@ -14,6 +14,7 @@ import { replyToSender } from './middlewares/reply.js';
 import { rateLimit } from './middlewares/rateLimit.js';
 import { mute } from './middlewares/mute.js';
 import { searchIndexer } from './middlewares/searchIndex.js';
+import { digestCollector } from './middlewares/digest.js';
 import { userDirectory } from './middlewares/directory.js';
 import { registerBasicCommands } from './commands/basic.js';
 import { registerAiCommands } from './commands/ai.js';
@@ -88,6 +89,10 @@ export function createBot(): Bot<BotContext> {
   // 7. Архив переписки для поиска по смыслу. Стоит после рейт-лимита:
   //    отбитый спам индексировать незачем.
   bot.use(searchIndexer);
+
+  // 7.5. Долгая память раздела — скользящая выжимка переписки, по той же
+  //      причине стоит после рейт-лимита (см. src/services/digest.ts).
+  bot.use(digestCollector);
 
   // 8. Команды. registerAiCommands — последней: внутри неё висит «ловушка»
   //    для обычных сообщений, и она должна получать управление после всех.
