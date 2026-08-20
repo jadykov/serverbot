@@ -60,14 +60,23 @@ async function load(): Promise<void> {
   }
 }
 
-/** Пишет справочник на диск переименованием: оборвись процесс — файл целый. */
+/**
+ * Пишет справочник на диск переименованием: оборвись процесс — файл целый.
+ *
+ * Имя временного файла своё у каждой записи, включая случайный хвост. Это
+ * не педантизм: rememberUser зовётся на каждое сообщение и не ожидается
+ * вызывающим, так что два новых человека в одну миллисекунду дали бы две записи
+ * с одним именем — они писали бы в один файл вперемешку, а переименовали бы
+ * вторым, и на диск легла бы каша. Следующий старт не разобрал бы JSON
+ * и начал справочник с нуля.
+ */
 async function save(): Promise<void> {
   const plain: Record<string, KnownUser> = {};
   for (const [username, user] of users) plain[username] = user;
 
   try {
     await mkdir(path.dirname(directoryFile()), { recursive: true });
-    const tmp = `${directoryFile()}.${process.pid}.${Date.now()}.tmp`;
+    const tmp = `${directoryFile()}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
     await writeFile(tmp, JSON.stringify(plain), 'utf8');
     await rename(tmp, directoryFile());
   } catch (error) {
