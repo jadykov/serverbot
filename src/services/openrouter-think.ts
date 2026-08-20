@@ -14,9 +14,10 @@
  *
  *  • думанье просят параметром reasoning, а не словами в промпте. effort —
  *    это доля бюджета, уходящая на размышление: high ≈ 0,8 от max_tokens,
- *    xhigh ≈ 0,95. Отсюда ловушка: при xhigh и скромном max_tokens модель
- *    продумает всё и не оставит места самому ответу. Поэтому по умолчанию
- *    high при 12 000 — около 9600 токенов на мысли и 2400 на текст;
+ *    xhigh и max ≈ 0,95. Отсюда ловушка: доля делит не качество, а место,
+ *    и при max модель продумает всё, не оставив себе места написать.
+ *    Поэтому по умолчанию high при 24 000 — 19 200 токенов на мысли
+ *    и 4800 на текст, чего хватает и на длинный ответ по существу;
  *  • сами мысли не возвращаются (reasoning.exclude). Платим за них всё
  *    равно — но в чате они не нужны, там нужен ответ;
  *  • модель — переменная в .env, и это не лень, а осознанный выбор: цена
@@ -68,7 +69,34 @@ export interface DeepAnswer {
    * упёрлась в него, есть о чём говорить.
    */
   thoughtTokens?: number;
+  /**
+   * Кончилось ли место посреди ответа. Молчать об этом нельзя: оборванный
+   * текст выглядит как законченный — просто короче, чем ждали, — и человек
+   * решает, что модель так и ответила, вместо того чтобы переспросить
+   * покороче или поднять DEEP_MAX_TOKENS.
+   */
+  truncated?: boolean;
   elapsedMs: number;
+}
+
+/**
+ * Сколько токенов из бюджета отведено мыслям при нынешнем усилии.
+ *
+ * Нужна не запросу, а подписи под ответом: «мыслей 13 500 из 19 200» —
+ * единственный способ понять, тесно модели или просторно, а сам OpenRouter
+ * этого числа не сообщает, только фактическую трату.
+ */
+const THOUGHT_SHARE: Record<string, number> = {
+  low: 0.2,
+  medium: 0.5,
+  high: 0.8,
+  xhigh: 0.95,
+  max: 0.95,
+};
+
+export function deepThoughtBudget(): number {
+  const { effort, maxTokens } = config.openrouter.deep;
+  return Math.round(maxTokens * (THOUGHT_SHARE[effort.toLowerCase()] ?? 0.8));
 }
 
 export const DEEP_SETUP_HINT =
@@ -245,6 +273,8 @@ export async function thinkDeeply(question: string, pages: WebPage[] = []): Prom
 
   const elapsedMs = Date.now() - startedAt;
   const thoughtTokens = data.usage?.completion_tokens_details?.reasoning_tokens;
+  // Текст есть, но бюджет кончился раньше точки: ответ оборван на полуслове.
+  const truncated = data.choices?.[0]?.finish_reason === 'length';
 
   logger.info('Размышление готово', {
     model: data.model ?? model,
@@ -253,6 +283,7 @@ export async function thinkDeeply(question: string, pages: WebPage[] = []): Prom
     pages: pages.length,
     seconds: Math.round(elapsedMs / 1000),
     thoughtTokens,
+    truncated,
     completionTokens: data.usage?.completion_tokens,
     chars: text.length,
     costUsd: data.usage?.cost,
@@ -263,6 +294,7 @@ export async function thinkDeeply(question: string, pages: WebPage[] = []): Prom
     model: data.model ?? model,
     ...(typeof data.usage?.cost === 'number' ? { costUsd: data.usage.cost } : {}),
     ...(typeof thoughtTokens === 'number' ? { thoughtTokens } : {}),
+    ...(truncated ? { truncated: true } : {}),
     elapsedMs,
   };
 }

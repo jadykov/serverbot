@@ -63,7 +63,7 @@ import { clampDuration, generateTrack, isMusicConfigured, MUSIC_SETUP_HINT } fro
 import { isInstrumental, planSong } from '../services/song-prompt.js';
 import { isWebSearchConfigured, searchWeb, WEB_SETUP_HINT } from '../services/openrouter-web.js';
 import { isTavilyConfigured, searchTavily, TAVILY_SETUP_HINT, type WebPage } from '../services/tavily.js';
-import { DEEP_SETUP_HINT, isDeepThinkConfigured, thinkDeeply } from '../services/openrouter-think.js';
+import { DEEP_SETUP_HINT, deepThoughtBudget, isDeepThinkConfigured, thinkDeeply } from '../services/openrouter-think.js';
 import { deepQuota, trackQuota, webQuota } from '../services/daily-quota.js';
 import { handleFile, sendAnswerAsFile, takeAnswerFormat, type AnswerFormat } from './file.js';
 import { MAIN_CHAIN, resolveChain, THINK_CHAIN, VOICE_CHAIN, WEB_CHAIN, type ChainInfo } from '../models.js';
@@ -1052,10 +1052,16 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
     // в потолок — есть смысл поднимать, потратила треть — незачем.
     const thoughts =
       typeof answer.thoughtTokens === 'number'
-        ? `, мыслей ${answer.thoughtTokens.toLocaleString('ru')} из ${Math.round(
-            config.openrouter.deep.maxTokens * 0.8,
-          ).toLocaleString('ru')}`
+        ? `, мыслей ${answer.thoughtTokens.toLocaleString('ru')} из ${deepThoughtBudget().toLocaleString('ru')}`
         : '';
+
+    // Оборванный ответ выглядит как законченный, просто короткий, — поэтому
+    // о нём говорят прямо и говорят, что делать: спросить уже, а не поднимать
+    // потолок ради одного случая.
+    const cut = answer.truncated
+      ? '\n\n⚠️ Место кончилось раньше мысли: ответ оборван. Спросите то же самое уже — ' +
+        'по одному дню, по одному пункту, — или поднимите DEEP_MAX_TOKENS.'
+      : '';
 
     // Источники — ссылками под ответом, как у «!сети». Ответ мог уехать
     // файлом, а ссылки нужны в чате, поэтому они в подписи, а не в тексте.
@@ -1073,7 +1079,7 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
 
     await ctx.reply(
       `<i>Думала <code>${escapeHtml(answer.model)}</code>, ${Math.round(answer.elapsedMs / 1000)} с${thoughts}${grounded}, ${price}. ` +
-        `Осталось на сегодня: ${quota.remaining} из ${quota.limit}.</i>${sources}`,
+        `Осталось на сегодня: ${quota.remaining} из ${quota.limit}.</i>${cut}${sources}`,
       { parse_mode: 'HTML', link_preview_options: { is_disabled: true } },
     );
 
