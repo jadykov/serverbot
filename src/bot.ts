@@ -14,6 +14,7 @@ import { replyToSender } from './middlewares/reply.js';
 import { rateLimit } from './middlewares/rateLimit.js';
 import { mute } from './middlewares/mute.js';
 import { searchIndexer } from './middlewares/searchIndex.js';
+import { userDirectory } from './middlewares/directory.js';
 import { registerBasicCommands } from './commands/basic.js';
 import { registerAiCommands } from './commands/ai.js';
 import { registerDrawCommands } from './commands/draw.js';
@@ -46,7 +47,11 @@ export function createBot(): Bot<BotContext> {
   // 2. Ответы реплаем и в нужный топик форума.
   bot.use(replyToSender);
 
-  // 3. Сессия. Лежит в файлах на диске, а не в памяти процесса: в ней история
+  // 3. Справочник «@ник → id». До сессии и до выключателя: знание о том, кто
+  //    есть в чате, не зависит ни от раздела, ни от того, включён ли в нём бот.
+  bot.use(userDirectory);
+
+  // 4. Сессия. Лежит в файлах на диске, а не в памяти процесса: в ней история
   //    диалога каждого топика. Держи мы её в памяти, любой деплой молча
   //    обрывал бы все разговоры на полуслове — ошибки нет, бот работает,
   //    просто перестаёт понимать, о чём шла речь.
@@ -72,19 +77,19 @@ export function createBot(): Bot<BotContext> {
     }),
   );
 
-  // 4. Выключатель раздела. Стоит сразу после сессии — она ему и нужна, —
+  // 5. Выключатель раздела. Стоит сразу после сессии — она ему и нужна, —
   //    и до всего остального: в выключенном топике бот не отвечает, не тратит
   //    квоты и не пополняет архив поиска (см. middlewares/mute.ts).
   bot.use(mute);
 
-  // 5. Защита от спама.
+  // 6. Защита от спама.
   bot.use(rateLimit);
 
-  // 6. Архив переписки для поиска по смыслу. Стоит после рейт-лимита:
+  // 7. Архив переписки для поиска по смыслу. Стоит после рейт-лимита:
   //    отбитый спам индексировать незачем.
   bot.use(searchIndexer);
 
-  // 7. Команды. registerAiCommands — последней: внутри неё висит «ловушка»
+  // 8. Команды. registerAiCommands — последней: внутри неё висит «ловушка»
   //    для обычных сообщений, и она должна получать управление после всех.
   //    registerDrawCommands стоит перед ней по той же причине: правка промпта
   //    приходит обычным сообщением, и перехватить его надо раньше ловушки.
@@ -92,7 +97,7 @@ export function createBot(): Bot<BotContext> {
   registerDrawCommands(bot);
   registerAiCommands(bot);
 
-  // 8. Глобальная ловушка ошибок: без неё любое исключение
+  // 9. Глобальная ловушка ошибок: без неё любое исключение
   //    в обработчике уронит поллинг.
   bot.catch(async (botError) => {
     const { ctx, error } = botError;

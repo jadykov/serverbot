@@ -35,11 +35,12 @@ export type QuotaDecision =
   | { allowed: true; used: number; limit: number; remaining: number }
   | { allowed: false; used: number; limit: number; resetsIn: string };
 
-/** Одна норма: занять слот, подсмотреть остаток, вернуть слот назад. */
+/** Одна норма: занять слот, подсмотреть остаток, вернуть слот назад, обнулить. */
 export interface DailyQuota {
   reserve(userId: number | undefined): Promise<QuotaDecision>;
   peek(userId: number | undefined): Promise<{ used: number; limit: number } | null>;
   release(userId: number | undefined): Promise<void>;
+  reset(userId: number | undefined): Promise<number>;
 }
 
 interface QuotaOptions {
@@ -199,6 +200,32 @@ function createDailyQuota({ file, what, limit: limitOf, timezone }: QuotaOptions
       return { used: record?.day === currentDay() ? record.used : 0, limit };
     },
 
+    /**
+     * Обнуляет норму одному человеку — руками администратора.
+     *
+     * Возвращает, сколько было потрачено до обнуления: по этому числу видно,
+     * был ли смысл в сбросе, и оно же попадает в ответ бота.
+     *
+     * Правится и память, и диск разом, и это здесь главное: файл на диске —
+     * лишь страховка на случай рестарта, читается он один раз при старте,
+     * и правка файла на работающем боте не даёт ничего — следующее списание
+     * перезапишет его тем, что лежит в памяти.
+     */
+    async reset(userId) {
+      if (userId === undefined) return 0;
+
+      await load();
+
+      const record = records.get(userId);
+      const used = record?.day === currentDay() ? record.used : 0;
+
+      records.delete(userId);
+      await save();
+      logger.info(`Норма ${what} сброшена вручную`, { userId, used });
+
+      return used;
+    },
+
     /** Возвращает занятый слот обратно, если результата так и не вышло. */
     async release(userId) {
       if (userId === undefined) return;
@@ -242,3 +269,33 @@ export const deepQuota = createDailyQuota({
   limit: () => config.deepQuota.perUserPerDay,
   timezone: () => config.deepQuota.timezone,
 });
+
+/**
+ * Все нормы разом — для админского сброса.
+ *
+ * Список здесь, а не в команде, по той же причине, по которой здесь фабрика:
+ * появится пятая платная штука — она добавится строкой в этом файле, и сброс
+ * подхватит её сам, без правок в командах.
+ */
+export const everyQuota: ReadonlyArray<{ what: string; quota: DailyQuota }> = [
+  { what: 'картинки', quota: imageQuota },
+  { what: 'треки', quota: trackQuota },
+  { what: 'поиск', quota: webQuota },
+  { what: 'размышления', quota: deepQuota },
+];
+
+/**
+ * Обнуляет человеку все дневные нормы. Возвращает то, что было потрачено,
+ * — только по непустым нормам: «сброшено: картинки 3, размышления 2»
+ * говорит больше, чем список из четырёх нулей.
+ */
+export async function resetEveryQuota(userId: number): Promise<string[]> {
+  const spent: string[] = [];
+
+  for (const { what, quota } of everyQuota) {
+    const used = await quota.reset(userId);
+    if (used > 0) spent.push(`${what} ${used}`);
+  }
+
+  return spent;
+}

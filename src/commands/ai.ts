@@ -46,7 +46,7 @@
  *     (@BotFather → /setprivacy → Disable).
  */
 import { GrammyError, InputFile, type Bot } from 'grammy';
-import { config } from '../config.js';
+import { config, isAdmin } from '../config.js';
 import { logger } from '../logger.js';
 import { findTextProvider } from '../services/registry.js';
 import { escapeHtml, markdownToTelegramHtml, MESSAGE_LIMIT, splitMarkdown } from '../format.js';
@@ -59,12 +59,13 @@ import { rememberMessage, searchMessages } from '../services/search-index.js';
 import { BOX_COLORS, drawBoxes, findObjects } from '../services/pointing.js';
 import { prepareDocument } from '../services/documents.js';
 import { prepareVoice } from '../services/voice.js';
+import { findUser, knownUsers } from '../services/user-directory.js';
 import { clampDuration, generateTrack, isMusicConfigured, MUSIC_SETUP_HINT } from '../services/goapi-music.js';
 import { isInstrumental, planSong } from '../services/song-prompt.js';
 import { isWebSearchConfigured, searchWeb, WEB_SETUP_HINT } from '../services/openrouter-web.js';
 import { isTavilyConfigured, searchTavily, TAVILY_SETUP_HINT, type WebPage } from '../services/tavily.js';
 import { DEEP_SETUP_HINT, deepThoughtBudget, isDeepThinkConfigured, thinkDeeply } from '../services/openrouter-think.js';
-import { deepQuota, trackQuota, webQuota } from '../services/daily-quota.js';
+import { deepQuota, resetEveryQuota, trackQuota, webQuota } from '../services/daily-quota.js';
 import { handleFile, sendAnswerAsFile, takeAnswerFormat, type AnswerFormat } from './file.js';
 import { MAIN_CHAIN, resolveChain, THINK_CHAIN, VOICE_CHAIN, WEB_CHAIN, type ChainInfo } from '../models.js';
 import {
@@ -210,6 +211,28 @@ const DEEP_PREFIX = switchWord('размышление');
  * Расшифровку при этом бот не печатает — см. VOICE_RULE ниже.
  */
 const VOICE_PREFIX = switchWord('расшифруй|послушай');
+
+/**
+ * Служебное слово-переключатель, в справке его нет: «/гем !resetuser @ник» —
+ * обнулить человеку дневные нормы, все четыре разом.
+ *
+ * Нужно потому, что иначе сброс — это ssh на сервер, правка файла в контейнере
+ * и обязательный рестарт: счётчик живёт в памяти процесса, а файл на диске
+ * читается один раз при старте, и правка на ходу не даёт ничего. Отсюда же
+ * и место команды — в боте, а не в скрипте: сбрасывают норму не в тишине
+ * серверной, а посреди разговора, когда человек в неё упёрся.
+ *
+ * В /help слова нет намеренно: это не возможность группы, а инструмент того,
+ * кто платит по счёту. Норму же надо иметь возможность и не сбрасывать —
+ * знай о команде все, просить начнут все.
+ *
+ * Кого сбрасывать:
+ *   • «self» — себя;
+ *   • «@ник» — по справочнику (см. services/user-directory.ts);
+ *   • числовой id — если ник неизвестен, а id есть;
+ *   • реплаем без слов — тому, чьё сообщение процитировали.
+ */
+const RESET_PREFIX = switchWord('resetuser');
 
 /**
  * Та же команда, но в подписи к фотографии: «/гем что здесь написано».
@@ -602,7 +625,15 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
    * «!найди» и «!контекст» пропускает дальше: они про своё, и то, что рядом
    * оказалась фотография, ничего в них не меняет.
    */
-  // «!личка» проверяем первой: она про доставку уже готового сообщения,
+  // «!resetuser» — самой первой: она служебная, ни с чем не пересекается,
+  // и реплай при ней означает «вот этот человек», а не «вот этот файл».
+  const reset = RESET_PREFIX.exec(trimmed);
+  if (reset) {
+    await handleResetUser(ctx, reset[1] ?? '');
+    return;
+  }
+
+  // «!личка» проверяем следующей: она про доставку уже готового сообщения,
   // и что там внутри — файл, снимок или текст — совершенно неважно. Иначе
   // реплай на документ утащил бы handleDocument, а на фото — разбор снимка.
   if (DM_PREFIX.test(trimmed)) {
@@ -1286,6 +1317,80 @@ function trimForSpeech(text: string, limit: number): { text: string; trimmed: bo
   const lastStop = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '), cut.lastIndexOf('\n'));
 
   return { text: lastStop > limit / 3 ? cut.slice(0, lastStop + 1) : cut, trimmed: true };
+}
+
+/**
+ * «/гем !resetuser …» — обнулить человеку дневные нормы. Только для админов.
+ *
+ * Сбрасываются все четыре разом (картинки, треки, поиск, размышления), и это
+ * не лень: сбрасывают норму не «по бухгалтерии», а потому что человеку нужно
+ * доделать начатое, и выяснять при этом, какая именно норма кончилась, —
+ * лишний ход. Что было потрачено, бот в ответе покажет.
+ */
+async function handleResetUser(ctx: BotContext, target: string): Promise<void> {
+  // Не «доступ запрещён», а ровное объяснение: команда служебная, и человек,
+  // набравший её из любопытства, не сделал ничего плохого.
+  if (!isAdmin(ctx.from?.id)) {
+    await ctx.reply('Это служебная команда: сбрасывать нормы может только тот, кто платит по счёту.');
+    return;
+  }
+
+  const asked = target.trim();
+  const replied = ctx.message?.reply_to_message?.from;
+
+  /** Кого сбрасываем: id и как его назвать в ответе. */
+  let userId: number | undefined;
+  let who = '';
+
+  if (asked.toLowerCase() === 'self') {
+    userId = ctx.from?.id;
+    who = 'вам';
+  } else if (!asked && replied && !replied.is_bot) {
+    userId = replied.id;
+    who = replied.username ? `@${replied.username}` : replied.first_name || String(replied.id);
+  } else if (/^\d+$/.test(asked)) {
+    userId = Number(asked);
+    who = `id ${asked}`;
+  } else if (asked) {
+    const found = await findUser(asked);
+    if (!found) {
+      // Метода «найди человека по нику» в Bot API нет вовсе, и это не наша
+      // недоработка: бот знает только тех, кого слышал. Поэтому не «нет
+      // такого пользователя», а «я его пока не слышал», — разница важная.
+      await ctx.reply(
+        `Ника <code>${escapeHtml(asked.replace(/^@/, ''))}</code> в справочнике нет: ` +
+          'по нику я узнаю только тех, кто писал в чат при мне ' +
+          `(сейчас таких ${await knownUsers()}). ` +
+          'Ответьте <code>!resetuser</code> реплаем на его сообщение — так сработает всегда, — ' +
+          'или дайте числовой id, его показывает /whoami.',
+        { parse_mode: 'HTML' },
+      );
+      return;
+    }
+    userId = found.id;
+    who = found.name ? `${found.name} (@${asked.replace(/^@/, '')})` : `@${asked.replace(/^@/, '')}`;
+  }
+
+  if (userId === undefined) {
+    await ctx.reply(
+      'Кому сбросить нормы:\n' +
+        '<code>/гем !resetuser self</code> — себе\n' +
+        '<code>/гем !resetuser @ник</code> — по нику\n' +
+        '<code>/гем !resetuser</code> реплаем на сообщение — его автору',
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
+  const spent = await resetEveryQuota(userId);
+
+  logger.info('Нормы сброшены вручную', { by: ctx.from?.id, userId, spent });
+
+  await ctx.reply(
+    spent.length > 0
+      ? `♻️ Нормы сброшены ${who}: было потрачено ${spent.join(', ')}. Все четыре снова полные.`
+      : `♻️ Сбрасывать ${who} было нечего — сегодня ни одна норма не тронута.`,
+  );
 }
 
 /**
