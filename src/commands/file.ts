@@ -115,13 +115,23 @@ function buildInstruction(hint: string): string {
 }
 
 /**
+ * Расширения, которым нужен BOM: без него iOS (Quick Look и сам Telegram)
+ * иногда путает кодировку простого текста, и кириллица приезжает кракозябрами.
+ * У остальных форматов свой парсер (JSON, SVG, код), которому BOM в начале
+ * файла только мешает, — их не трогаем.
+ */
+const NEEDS_BOM = new Set(['md', 'txt']);
+
+/**
  * Отправляет готовое содержимое файлом.
  *
  * В чат уходит короткая подпись — она же попадает в архив поиска. Сам файл
  * туда не ляжет: индексируется текст сообщений, а вложение поиск не увидит.
  */
 async function sendFile(ctx: BotContext, content: string, fileName: string, caption: string): Promise<void> {
-  const data = Buffer.from(content, 'utf8');
+  const ext = fileName.slice(fileName.lastIndexOf('.') + 1).toLowerCase();
+  const text = NEEDS_BOM.has(ext) ? `\uFEFF${content}` : content;
+  const data = Buffer.from(text, 'utf8');
 
   await ctx.replyWithDocument(new InputFile(data, fileName), {
     caption: `${caption}\n<code>${escapeHtml(fileName)}</code>, ${(data.length / 1024).toFixed(1)} КБ`,
