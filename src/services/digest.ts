@@ -112,6 +112,9 @@ async function mergeDigest(key: string, lines: PendingLine[]): Promise<void> {
       systemPrompt: DIGEST_ROLE,
       temperature: 0.3,
       maxOutputTokens: config.digest.maxOutputTokens,
+      // Без общих правил бота (разметка, смайлики) — это не ответ в чат,
+      // а служебное сжатие, им они только мешают.
+      rawSystemPrompt: true,
     });
 
     await saveDigest(key, text.trim().slice(0, config.digest.maxChars));

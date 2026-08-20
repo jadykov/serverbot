@@ -298,6 +298,38 @@ export async function flushAll(): Promise<void> {
 }
 
 /**
+ * Отдаёт последние N реплик архива как есть, без поиска и без эмбеддингов.
+ *
+ * Нужна спонтанным репликам (src/services/spontaneous.ts): им важен сам
+ * разговор, а не близость к запросу — векторы тут ни при чём и денег не стоят.
+ * Буфер ещё не сброшенных реплик (см. pending выше) сюда не попадает —
+ * в худшем случае свежайшие несколько реплик обнаружатся минутой позже.
+ */
+export async function recentMessages(key: string, limit: number): Promise<IndexedMessage[]> {
+  let raw: string;
+  try {
+    raw = await readFile(archivePath(key), 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+
+  const lines = raw.split('\n').filter((line) => line.trim());
+  const records: IndexedMessage[] = [];
+
+  for (const line of lines.slice(-limit)) {
+    try {
+      const { ts, who, text, messageId } = JSON.parse(line) as StoredRecord;
+      records.push({ ts, who, text, messageId });
+    } catch {
+      // Битая строка — обрыв записи при остановке процесса. Пропускаем.
+    }
+  }
+
+  return records;
+}
+
+/**
  * Ищет по архиву раздела.
  *
  * Перед поиском досбрасываем буфер: обиднее всего не найти то,

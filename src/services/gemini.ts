@@ -244,7 +244,9 @@ export class GeminiProvider implements TextProvider {
           model,
           contents,
           config: {
-            systemInstruction: buildSystemPrompt(options.systemPrompt, options.extraInstruction),
+            systemInstruction: options.rawSystemPrompt
+              ? [options.systemPrompt?.trim(), options.extraInstruction?.trim()].filter(Boolean).join(' ')
+              : buildSystemPrompt(options.systemPrompt, options.extraInstruction),
             temperature: options.temperature ?? 0.8,
             maxOutputTokens,
             // Отправляется, только если задан GEMINI_THINKING (см. выше).

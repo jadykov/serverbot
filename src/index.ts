@@ -17,6 +17,7 @@ import { BOT_COMMANDS, createBot } from './bot.js';
 import { createHttpServer, listen } from './server.js';
 import { describeProviders } from './services/registry.js';
 import { flushAll } from './services/search-index.js';
+import { scheduleSpontaneous, stopSpontaneous } from './services/spontaneous.js';
 
 async function main(): Promise<void> {
   assertConfigValid();
@@ -56,6 +57,9 @@ async function main(): Promise<void> {
   const runner: RunnerHandle = run(bot);
   logger.info('Long polling запущен');
 
+  // Суточный цикл спонтанных реплик — см. src/services/spontaneous.ts.
+  scheduleSpontaneous(bot);
+
   logger.info('✅ Бот готов к работе');
 
   // ------------------------------------------------------------ shutdown
@@ -75,6 +79,7 @@ async function main(): Promise<void> {
     force.unref();
 
     try {
+      stopSpontaneous();
       if (runner.isRunning()) await runner.stop();
       // Реплики, не набравшие полную пачку, ждут своей очереди в памяти.
       // Без этой строчки каждая выкатка тихо теряла бы последние сообщения
