@@ -1681,12 +1681,18 @@ async function handleSpeak(ctx: BotContext, request: string): Promise<void> {
   // отделить голос и манеру от самой фразы её собственными словами, а дальше
   // эти слова идут через тот же parseVoiceRequest, что и для кавычек: разбор
   // остаётся одним и тем же, меняется только то, откуда берутся слова.
-  // Реплай и «последний ответ» так не разбираем — там просить нечего,
-  // это чужой готовый текст, а не свежая просьба с указаниями.
+  //
+  // Реплай передаём как контекст, а не как готовый ответ: «!скажи голосом
+  // старого деда» ответом на чужую реплику целиком состоит из указания
+  // голоса — озвучивать в буквальном смысле нечего, если не показать
+  // помощнику, что именно есть под рукой. planSpeech сам решит, что из
+  // asked — направление, а что, если вообще есть, — текст поверх контекста.
   if (!spec && asked) {
     const helper = findTextProvider(GEMINI_ID);
     if (helper?.isConfigured) {
-      const plan = await withChatAction(ctx, 'typing', () => planSpeech(helper, config.gemini.chains.light, asked));
+      const plan = await withChatAction(ctx, 'typing', () =>
+        planSpeech(helper, config.gemini.chains.light, asked, quoted || undefined),
+      );
       spoken = plan.text;
       if (plan.direction) {
         voiceRequest = parseVoiceRequest(plan.direction);
@@ -1744,6 +1750,21 @@ async function handleSpeak(ctx: BotContext, request: string): Promise<void> {
  * модель пишет музыку. Спрашивать «начинать?» после того, как текст уже
  * написан, значит удваивать шаги ради того же результата.
  */
+/**
+ * Убирает служебные теги структуры песни ([verse], [chorus], [bridge], ...)
+ * из текста, который видит человек в чате, — оставляя саму разметку как
+ * границы абзацев. Ace-Step эти теги требуются буквально в тексте (см.
+ * planSong в services/song-prompt.ts), а читателю в Telegram они не нужны:
+ * ни один человек не подпевает по строке «[chorus]».
+ */
+function humanizeLyrics(lyrics: string): string {
+  return lyrics
+    .split(/\[[a-zа-яё]+\]/gi)
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .join('\n\n');
+}
+
 async function handleTrack(ctx: BotContext, request: string): Promise<void> {
   if (!isMusicConfigured()) {
     await ctx.reply(`🔌 Музыка не подключена. ${MUSIC_SETUP_HINT}`);
@@ -1805,6 +1826,22 @@ async function handleTrack(ctx: BotContext, request: string): Promise<void> {
   }
 
   /**
+   * Теги структуры ([verse], [chorus], [bridge]) убираем не только из того,
+   * что видит человек, но и из того, что уходит в саму генерацию.
+   *
+   * По документации Ace-Step это специальные токены структуры, а не текст, —
+   * но на практике, на русских словах, модель их, похоже, поёт как есть:
+   * «bridge» звучит в записи наравне со словами песни (замечено на живых
+   * треках 21.08.2026). Модель в основном учена на английских текстах,
+   * и с русским вперемешку с тегами распознаёт их не так надёжно, как для
+   * английского. Раз структура всё равно ломается, а текст короткий
+   * (LYRICS_LINES = 5-8 строк, без нескольких куплетов и явного bridge),
+   * проще вовсе не размечать — и Telegram, и API получают один и тот же
+   * humanizeLyrics-текст, без тегов.
+   */
+  const lyrics = instrumental ? plan.lyrics : humanizeLyrics(plan.lyrics);
+
+  /**
    * Слова показываются сразу, пока пишется музыка: их всё равно захотят
    * прочесть, а в подпись к аудио они не влезут — у Telegram там 1024 знака.
    *
@@ -1813,7 +1850,7 @@ async function handleTrack(ctx: BotContext, request: string): Promise<void> {
    * в «&am», Telegram отвечает «can't parse entities», и человек не получает
    * ни слов, ни трека, хотя слот дневной нормы уже занят.
    */
-  const lyricsBlock = instrumental ? '<i>Без вокала.</i>' : escapeHtml(plan.lyrics.slice(0, 3000));
+  const lyricsBlock = instrumental ? '<i>Без вокала.</i>' : escapeHtml(lyrics.slice(0, 3000));
 
   const notice = await ctx.reply(
     [`🎵 <b>${escapeHtml(title)}</b> — пишу…`, '', `<i>${escapeHtml(plan.stylePrompt)}</i>`, '', lyricsBlock].join('\n'),
@@ -1825,7 +1862,7 @@ async function handleTrack(ctx: BotContext, request: string): Promise<void> {
       generateTrack({
         stylePrompt: plan.stylePrompt,
         negativeStylePrompt: plan.negativeStylePrompt,
-        lyrics: plan.lyrics,
+        lyrics,
         duration,
       }),
     );
