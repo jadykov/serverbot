@@ -6,11 +6,16 @@
  * недосказанное сама (у неё для этого есть параметр creativity со значением
  * medium по умолчанию), и попадание в замысел — дело случая.
  *
- * Теперь между командой и деньгами стоит бесплатный Gemini на лёгкой цепочке:
- * он смотрит, чего в запросе не хватает, задаёт два-три вопроса кнопками
- * и собирает промпт по правилам Krea (см. src/services/krea-prompt.ts). Деньги тратятся
- * только по явному нажатию «Рисовать», и промпт уходит с creativity=raw —
- * договорились об одном, значит рисуем именно это.
+ * Теперь между командой и деньгами стоит бесплатный Gemini на цепочке
+ * «Подумать» (GEMINI_CHAIN_THINK — картинка дороже лишних секунд на более
+ * умную модель): он смотрит, чего в запросе не хватает, готовит до пяти
+ * вопросов и собирает промпт по правилам Krea (см. src/services/krea-prompt.ts).
+ * Сколько из готовых вопросов реально задать — 1..N — выбирает сам человек
+ * на экране-слайдере между замыслом и первым вопросом; самые важные вопросы
+ * модель ставит первыми, так что даже «1» — это не наугад. Деньги тратятся
+ * только по явному нажатию «Рисовать», и промпт уходит с низкой креативностью
+ * (KREA_CREATIVITY_REFINED) — договорились об одном, значит рисуем в основном
+ * это, с минимальной дорисовкой.
  *
  * Там же, на экране подтверждения, выбирается форма картинки: набор кнопок
  * из тех пропорций, которые понимает модель. Свободного ввода нет намеренно —
@@ -37,15 +42,16 @@ const CB = 'd';
 const GEMINI_ID = 'gemini';
 
 /**
- * Кто собирает промпт: Gemini на отдельной лёгкой цепочке (GEMINI_CHAIN_DRAW),
- * а не на цепочке раздела. Человек ждёт ответа здесь и сейчас, а задача
- * формальная — вернуть JSON с вопросами; тяжёлая модель тратит на неё
- * 25 секунд вместо полутора, не выигрывая в качестве.
+ * Кто собирает промпт: Gemini на цепочке «Подумать» (GEMINI_CHAIN_THINK),
+ * а не на лёгкой цепочке раздела. Картинка стоит денег и нормирована —
+ * промах на этапе бесплатного разговора обиднее, чем лишние секунды
+ * на более умную модель здесь. Раньше стояла лёгкая GEMINI_CHAIN_DRAW —
+ * сменили ради меньшего числа испорченных попыток.
  */
 function planner(): { provider: TextProvider; models: string[] } | null {
   const provider = findTextProvider(GEMINI_ID);
   if (!provider?.isConfigured) return null;
-  return { provider, models: config.gemini.chains.draw };
+  return { provider, models: config.gemini.chains.think };
 }
 
 /** Достаёт черновики раздела, попутно выбрасывая протухшие. */
@@ -101,13 +107,47 @@ function ratioShape(ratio: string): string {
   return width > height ? 'ландшафт' : 'портрет';
 }
 
-/** Клавиатура одного вопроса: варианты ответа плюс «рисуй как есть». */
+/**
+ * Клавиатура одного вопроса: только варианты ответа.
+ *
+ * Без «рисуй как есть» намеренно: это была лазейка дорисовать недосказанное
+ * моделью Krea вместо ответа на уже заданный вопрос — картинка стоит денег,
+ * и попадание в замысел важнее лишней кнопки на выход.
+ */
 function questionKeyboard(step: number, options: string[]): InlineKeyboard {
   const keyboard = new InlineKeyboard();
   options.forEach((option, index) => {
     keyboard.text(option, `${CB}:a:${step}:${index}`).row();
   });
-  return keyboard.text('⏩ Рисуй как есть', `${CB}:skip`);
+  return keyboard;
+}
+
+/**
+ * Текст экрана выбора количества уточнений: модель уже насчитала вопросы,
+ * человек решает, сколько из них реально задать.
+ */
+function sliderText(draft: DrawDraft): string {
+  const total = draft.questions.length;
+
+  return [
+    `🎨 <b>${escapeHtml(draft.original)}</b>`,
+    '',
+    `Чтобы попасть точнее, можно уточнить до ${total} деталей — ` +
+      'самые важные модель задаст первыми. Сколько уточнить?',
+  ].join('\n');
+}
+
+/**
+ * Клавиатура-слайдер: по кнопке на каждое число от 1 до total. Выбор режет
+ * список вопросов сразу — дальше идёт обычный опрос по уже укороченному
+ * списку, без нового понятия в состоянии черновика.
+ */
+function sliderKeyboard(total: number): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (let count = 1; count <= total; count++) {
+    keyboard.text(`${count}/${total}`, `${CB}:n:${count}`);
+  }
+  return keyboard;
 }
 
 /**
@@ -225,8 +265,16 @@ export async function startDraw(ctx: BotContext, request: string): Promise<void>
     return;
   }
 
+  // Вопрос ровно один — выбирать не из чего, сразу к нему.
+  if (draft.questions.length === 1) {
+    setDraft(ctx, draft);
+    await ctx.reply(questionText(draft), { parse_mode: 'HTML', reply_markup: questionKeyboard(0, draft.questions[0]!.options) });
+    return;
+  }
+
+  // Вопросов несколько — человек сам решает, сколько из них отвечать.
   setDraft(ctx, draft);
-  await ctx.reply(questionText(draft), { parse_mode: 'HTML', reply_markup: questionKeyboard(0, draft.questions[0]!.options) });
+  await ctx.reply(sliderText(draft), { parse_mode: 'HTML', reply_markup: sliderKeyboard(draft.questions.length) });
 }
 
 function emptyDraft(request: string): DrawDraft {
@@ -346,22 +394,31 @@ export function registerDrawCommands(bot: Bot<BotContext>): void {
     });
   });
 
-  // «Рисуй как есть» — пропустить оставшиеся вопросы.
-  bot.callbackQuery(`${CB}:skip`, async (ctx) => {
+  // Выбор количества уточнений на экране-слайдере: обрезаем список вопросов
+  // до выбранного числа и идём по нему как по обычному опросу.
+  bot.callbackQuery(new RegExp(`^${CB}:n:(\\d+)$`), async (ctx) => {
     const draft = getDraft(ctx);
     if (!draft) {
       await ctx.answerCallbackQuery({ text: 'Этот черновик уже не действует — начните заново.', show_alert: true });
       return;
     }
 
-    await ctx.answerCallbackQuery();
+    const [, countRaw] = ctx.match as RegExpMatchArray;
+    const count = Number(countRaw);
 
-    // Человек отказался уточнять — пусть недосказанное дорисовывает модель.
-    draft.refined = false;
-    draft.prompt = draft.original;
-    draft.summary = draft.original;
+    if (!Number.isInteger(count) || count < 1 || count > draft.questions.length) {
+      await ctx.answerCallbackQuery({ text: 'Кнопка устарела.', show_alert: true });
+      return;
+    }
+
+    await ctx.answerCallbackQuery({ text: `${count}/${draft.questions.length}` });
+
+    draft.questions = draft.questions.slice(0, count);
     setDraft(ctx, draft);
-    await showConfirm(ctx, draft);
+    await ctx.editMessageText(questionText(draft), {
+      parse_mode: 'HTML',
+      reply_markup: questionKeyboard(0, draft.questions[0]!.options),
+    });
   });
 
   // Выбор формы. Ничего не тратит: меняет черновик и перерисовывает тот же экран.
