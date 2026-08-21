@@ -69,7 +69,7 @@ import { isTavilyConfigured, searchTavily, TAVILY_SETUP_HINT, type WebPage } fro
 import { DEEP_SETUP_HINT, deepThoughtBudget, isDeepThinkConfigured, thinkDeeply } from '../services/openrouter-think.js';
 import { deepQuota, imageQuota, resetEveryQuota, trackQuota, webQuota, type DailyQuota } from '../services/daily-quota.js';
 import { handleFile, sendAnswerAsFile, takeAnswerFormat, type AnswerFormat } from './file.js';
-import { MAIN_CHAIN, resolveChain, THINK_CHAIN, VOICE_CHAIN, WEB_CHAIN, type ChainInfo } from '../models.js';
+import { MAIN_CHAIN, resolveChain, THINK_CHAIN, VOICE_CHAIN, type ChainInfo } from '../models.js';
 import {
   ProviderNotConfiguredError,
   ProviderRequestError,
@@ -1254,9 +1254,10 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
 /**
  * Живой поиск: «/гем !сеть ...».
  *
- * Только Tavily: он отдаёт страницы, а ответ по ним пишет обычная цепочка
- * Gemini, та же, что отвечает на любой вопрос. Денег это не стоит вовсе —
- * тратится кредит из пакета и бесплатная норма Google.
+ * Только Tavily: он отдаёт страницы, а ответ по ним пишет цепочка «Подумать»
+ * (THINK_CHAIN) — та же, что у «!контекст». Денег это не стоит вовсе —
+ * тратится кредит из пакета и бесплатная норма Google, а разбор пяти
+ * найденных страниц как раз тот случай, где более сильная голова не лишняя.
  *
  * Платный запасной путь через плагин OpenRouter (services/openrouter-web.ts)
  * пока отключён — модуль остался в коде, но handleWeb его не вызывает.
@@ -1317,7 +1318,7 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
 }
 
 /**
- * Страницы от Tavily, ответ пишет обычная поисковая цепочка Gemini.
+ * Страницы от Tavily, ответ пишет цепочка «Подумать».
  *
  * Возвращает null, если ответить не вышло — ничего не нашлось или Gemini
  * не подключён; в обоих случаях сообщение об этом уже ушло пользователю.
@@ -1338,17 +1339,12 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
   const gemini = await requireGemini(ctx);
   if (!gemini) return null;
 
-  /**
-   * Цепочка поисковая, а не основная: голова у них одна и та же, но резерв
-   * разный — здесь он длиннее, а Gemma отодвинута в самый хвост. Подробности —
-   * у config.gemini.chains.web.
-   */
-  const chain = resolveChain(WEB_CHAIN);
+  const chain = resolveChain(THINK_CHAIN);
   const answer = await generateWithChain(gemini, chain.models, buildSearchPrompt(query, pages), {
-    // Потолок у цепочки свой и выше обычного: ответ метит под целое
-    // сообщение, а не под «покороче». ONE_POST_RULE сюда не передают —
-    // о длине с моделью договаривается WEB_ANSWER_RULE, и договаривается
-    // ровно наоборот.
+    // Потолок у THINK_CHAIN и так щедрее обычного (см. GEMINI_MAX_OUTPUT_THINK) —
+    // хватает и на рассуждение, и на разбор пяти страниц. ONE_POST_RULE сюда
+    // не передают — о длине с моделью договаривается WEB_ANSWER_RULE, и
+    // договаривается ровно наоборот: поиск платный, короткий ответ его тратит зря.
     maxOutputTokens: chain.maxOutputTokens,
     extraInstruction: WEB_ANSWER_RULE,
   });
