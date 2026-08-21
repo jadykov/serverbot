@@ -1064,7 +1064,10 @@ async function handleSearch(ctx: BotContext, query: string): Promise<void> {
  * поломкой.
  */
 const WEB_ANSWER_RULE = [
-  'Отвечай по найденным страницам, а не по памяти: они свежее того, что ты помнишь.',
+  'Это живой поиск, а не вопрос по памяти: сперва разберись, что реально написано',
+  'на найденных страницах, и только на этом фактическом основании — не до, а после —',
+  'добавляй своё сопоставление и выводы. Свои рассуждения и общие знания без опоры',
+  'на страницы не подмешивай и не подставляй вместо того, чего в них не нашлось.',
   'Отвечай подробно и по делу: 2300–2700 знаков — это почти целое сообщение Telegram,',
   'остаток занимает список источников, который допишет бот. Больше не пиши: лишнее не покажется.',
   'Начни с прямого ответа на вопрос в двух-трёх строках, дальше — подробности.',
@@ -1342,11 +1345,14 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
   const chain = resolveChain(THINK_CHAIN);
   const answer = await generateWithChain(gemini, chain.models, buildSearchPrompt(query, pages), {
     // Потолок у THINK_CHAIN и так щедрее обычного (см. GEMINI_MAX_OUTPUT_THINK) —
-    // хватает и на рассуждение, и на разбор пяти страниц. ONE_POST_RULE сюда
+    // хватает и на рассуждение, и на разбор найденных страниц. ONE_POST_RULE сюда
     // не передают — о длине с моделью договаривается WEB_ANSWER_RULE, и
     // договаривается ровно наоборот: поиск платный, короткий ответ его тратит зря.
     maxOutputTokens: chain.maxOutputTokens,
     extraInstruction: WEB_ANSWER_RULE,
+    // Свой, более щедрый таймаут: см. config.ai.webTimeoutMs — запрос сюда
+    // тяжелее обычного, общих 90 секунд голове цепочки не всегда хватает.
+    timeoutMs: config.ai.webTimeoutMs,
   });
 
   await sendWebAnswer(ctx, answer.text, pages.slice(0, 5).map((page) => sourceLink(page.title, page.url)));

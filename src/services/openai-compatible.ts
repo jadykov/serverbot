@@ -85,7 +85,7 @@ export class OpenAiCompatibleProvider implements TextProvider {
           max_tokens: options.maxOutputTokens ?? 2048,
         }),
         // AbortSignal.timeout доступен начиная с Node 18 — отдельная библиотека не нужна.
-        signal: AbortSignal.timeout(config.ai.timeoutMs),
+        signal: AbortSignal.timeout(options.timeoutMs ?? config.ai.timeoutMs),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

@@ -253,7 +253,7 @@ export class GeminiProvider implements TextProvider {
             ...(thinkingConfig ? { thinkingConfig } : {}),
           },
         }),
-        config.ai.timeoutMs,
+        options.timeoutMs ?? config.ai.timeoutMs,
         `Gemini (${model})`,
       );
 
