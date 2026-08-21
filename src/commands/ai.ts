@@ -1565,18 +1565,14 @@ async function handleTest(ctx: BotContext, question: string): Promise<void> {
     return;
   }
 
-  const startedAt = Date.now();
   try {
     const answer = await withChatAction(ctx, 'typing', () =>
       provider.generateText(question, { maxOutputTokens: config.test.maxOutputTokens }),
     );
 
+    // Без второй сноски-приписки: это команда для проверки, не для чтения,
+    // и время/провайдер и так видны в логах (logger.debug в openai-compatible.ts).
     await sendAnswer(ctx, answer, question);
-    await ctx.reply(
-      `<i>Тестовый провайдер (${escapeHtml(config.openai.baseUrl)}), ${((Date.now() - startedAt) / 1000).toFixed(1)} с. ` +
-        `Без цепочки, без истории раздела — только для проверки.</i>`,
-      { parse_mode: 'HTML' },
-    );
   } catch (error) {
     await replyWithError(ctx, error);
   }
