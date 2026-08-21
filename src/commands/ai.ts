@@ -930,13 +930,36 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   const gemini = await requireGemini(ctx);
   if (!gemini) return;
 
+  /**
+   * Реплай на текстовое сообщение вместе со своим вопросом: «/гем как тебе
+   * этот ответ?» на чужую реплику. Без этого цитируемый текст терялся бы
+   * целиком — extractPrompt подставляет реплай, только если аргументов
+   * не было вовсе (см. выше), а тут они есть, просто не про сам реплай.
+   *
+   * Сравнение с prompt отсекает как раз тот случай, когда extractPrompt уже
+   * взял реплай целиком за неимением своих слов, — цитировать текст сам
+   * на себя незачем. Реплай на фото/голос/документ сюда не долетает: у них
+   * свои ветки выше, они возвращаются раньше.
+   */
+  const repliedMessage = ctx.message?.reply_to_message;
+  const repliedText = repliedMessage?.text?.trim();
+  const promptWithQuote =
+    repliedText && repliedText !== prompt
+      ? repliedMessage?.from?.id === ctx.me.id
+        ? `Пользователь отвечает на твою реплику:\n«${repliedText.slice(0, 700)}»\n\nЕго вопрос: ${prompt}`
+        : `Вопрос задан реплаем на сообщение в чате:\n«${repliedText.slice(0, 700)}»\n\nВопрос: ${prompt}`
+      : prompt;
+
   const chain = think ? resolveChain(THINK_CHAIN) : resolveChain(MAIN_CHAIN);
   // Формат назвали — файл будет в любом случае. Не назвали — ответ пойдёт
   // в чат и станет файлом, только если не влезет в сообщение. Подробности
   // просят у «!контекста» в обоих случаях: файл тут про доставку, а не
   // про то, насколько обстоятельно разбирать.
-  const answered = await askChain(ctx, gemini, chain, prompt, {
+  const answered = await askChain(ctx, gemini, chain, promptWithQuote, {
     asFile: fileFormat,
+    // В историю — чистый вопрос, без цитаты: та либо и так уже в истории
+    // (если цитировали недавний ответ бота), либо разово нужна только модели.
+    historyText: prompt,
     ...(think ? { answerLength: 'detailed' as const } : {}),
   });
 
