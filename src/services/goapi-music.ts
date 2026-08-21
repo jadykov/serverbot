@@ -23,8 +23,10 @@
  *  • платится длительность, а не запрос. Отсюда и потолок в конфигурации:
  *    он выбран по кошельку, а не по пределу модели (240 секунд). Сорок
  *    секунд стоят $0,02 — чуть дороже картинки;
- *  • длину вступления и концовки задать нечем: полей для них нет, только
- *    слова и теги в запросе (см. EDGE_SECONDS в services/song-prompt.ts).
+ *  • отдельного поля «длина вступления» нет, но есть negative_style_prompt —
+ *    чего в звуке быть не должно. Вместе с тегами в style_prompt и словами
+ *    в lyrics это три независимых рычага против долгого проигрыша, а не один
+ *    (см. NEGATIVE_STYLE_PROMPT и EDGE_SECONDS в services/song-prompt.ts).
  */
 import { config } from '../config.js';
 import { logger } from '../logger.js';
@@ -40,6 +42,12 @@ export const MUSIC_SETUP_HINT =
 export interface TrackRequest {
   /** Описание музыки для модели, по-английски: жанр, инструменты, голос, темп. */
   stylePrompt: string;
+  /**
+   * Чего в музыке быть не должно, по-английски. Второй, более сильный рычаг
+   * против долгого вступления/затухания, кроме тегов в stylePrompt и слов
+   * в lyrics — см. NEGATIVE_STYLE_PROMPT в services/song-prompt.ts.
+   */
+  negativeStylePrompt?: string;
   /** Слова песни. «[inst]» — инструментал без вокала. */
   lyrics: string;
   /** Длительность в секундах. Урезается по потолку из конфигурации. */
@@ -157,6 +165,7 @@ async function createTask(request: TrackRequest): Promise<string> {
     task_type: taskType,
     input: {
       style_prompt: request.stylePrompt,
+      ...(request.negativeStylePrompt ? { negative_style_prompt: request.negativeStylePrompt } : {}),
       lyrics: request.lyrics,
       duration: request.duration,
     },

@@ -5,9 +5,11 @@
  * вещи: style_prompt — теги про музыку по-английски, и lyrics — собственно
  * слова с разметкой структуры ([verse], [chorus]). Написать это руками
  * каждый раз никто не станет, а без слов Ace-Step отдаёт инструментал.
- * Поэтому черновик собирает бесплатный Gemini на лёгкой цепочке — той же,
- * что готовит запросы к рисованию: задача формальная, и тяжёлая модель
- * тратит на неё двадцать секунд, ничего не выигрывая.
+ * Поэтому черновик собирает бесплатный Gemini на лёгкой формальной цепочке
+ * (GEMINI_CHAIN_LIGHT — той же, что и у свободного разбора «!скажи», см.
+ * planSpeech в services/gemini-tts.ts): задача формальная, и тяжёлая модель
+ * тратит на неё двадцать секунд, ничего не выигрывая. Рисование этой цепочкой
+ * больше не пользуется — оно с 21.08.2026 на THINK_CHAIN (см. commands/draw.ts).
  *
  * Что известно про эту модель (карточка ace-step/ACE-Step и её примеры):
  *
@@ -20,8 +22,11 @@
  *    поэтому русский текст так и пишется по-русски;
  *  • длительность — параметр запроса, а не просьба в промпте, и она же
  *    цена: платится секунда готового звука;
- *  • а вот длина вступления и концовки полем не задаётся никак — только
- *    словами и тегами (см. EDGE_SECONDS ниже).
+ *  • длина вступления и концовки отдельным полем не задаётся, зато есть
+ *    negative_style_prompt — то, чего в звуке быть не должно. Вместе
+ *    с тегами в style_prompt и словами в lyrics это уже три независимых
+ *    рычага против долгого проигрыша, а не один (см. EDGE_SECONDS
+ *    и NEGATIVE_STYLE_PROMPT ниже).
  */
 import { config } from '../config.js';
 import { logger } from '../logger.js';
@@ -32,6 +37,13 @@ import type { TextProvider } from '../types.js';
 export interface SongPlan {
   /** Теги про музыку, по-английски. */
   stylePrompt: string;
+  /**
+   * Чего в музыке быть не должно, по-английски — фиксированный набор,
+   * не зависит от замысла (см. NEGATIVE_STYLE_PROMPT). Отдельным полем
+   * от модели не просим: это продуктовое решение «короткие края всегда»,
+   * а не то, что стоит доверять творчеству помощника заново на каждой песне.
+   */
+  negativeStylePrompt: string;
   /** Слова с разметкой структуры или «[inst]» для инструментала. */
   lyrics: string;
   /** Название трека по-русски — для подписи и имени файла. */
@@ -58,6 +70,16 @@ const INSTRUMENTAL = '[inst]';
  * оборвётся на полуслове.
  */
 const EDGE_SECONDS = 5;
+
+/**
+ * Второй, более сильный рычаг против долгого проигрыша — negative_style_prompt
+ * у Ace-Step, который тегам в style_prompt не всегда подчиняется (это же
+ * творческая модель, а не строгий парсер). Фиксированный список, не зависит
+ * от замысла песни: короткие края нужны всегда, а не только когда попросили.
+ */
+const NEGATIVE_STYLE_PROMPT =
+  'long intro, slow build-up, instrumental intro, spoken word intro, late vocal entry, ' +
+  'long outro, extended fade-out, noise';
 
 /** Сколько коротких строк поместится в трек: примерно строка на четыре секунды. */
 function lineCount(duration: number): number {
@@ -128,6 +150,11 @@ function instruction(): string {
     `Если человек просит музыку без вокала (инструментал, минус, фон), верни lyrics ровно «${INSTRUMENTAL}».`,
     'Во всех остальных случаях песня со словами — это то, зачем команду и позвали.',
     '',
+    'Если следом дали ещё и сообщение из чата («ситуацию») — это сюжет песни:',
+    'слова пиши про него, не про замысел буквально. Замысел («грустная», «в стиле рэп»,',
+    '«с издёвкой») — это тон и жанр, ситуация — то, о чём тон и жанр звучат.',
+    'В лоб не цитируй, если не попросили дословно, — перескажи песней, своими словами.',
+    '',
     'Ответь строго одним JSON-объектом без пояснений:',
     '{"style_prompt":"теги по-английски",',
     ' "lyrics":"[verse]\\nстрока\\nстрока\\n[chorus]\\nстрока",',
@@ -156,6 +183,7 @@ function toPlan(text: string): SongPlan | null {
 
     return {
       stylePrompt,
+      negativeStylePrompt: NEGATIVE_STYLE_PROMPT,
       lyrics: lyrics || INSTRUMENTAL,
       title: typeof parsed.title === 'string' && parsed.title.trim() ? parsed.title.trim() : '',
       duration: Number.isFinite(duration) && duration > 0 ? duration : config.goapi.music.duration,
@@ -175,12 +203,28 @@ function toPlan(text: string): SongPlan | null {
  * запрос здесь нельзя. Русская фраза в style_prompt даст модели не тот
  * стиль, а слов не даст вовсе — вместо песни приедет инструментал за те же
  * деньги. Лучше честно не начинать: этот шаг бесплатный, а трек — нет.
+ *
+ * situation — реплай на сообщение («!трек песня о ситуации» ответом на чужую
+ * реплику): текст, о котором должна быть песня. Отдельно от request, потому
+ * что роли разные — request это тон и жанр («грустная», «в стиле рэп»),
+ * а situation это сюжет, который в лоб просить неоткуда, если он уже написан
+ * в чате до команды.
  */
-export async function planSong(provider: TextProvider, models: string[], request: string): Promise<SongPlan | null> {
+export async function planSong(
+  provider: TextProvider,
+  models: string[],
+  request: string,
+  situation?: string,
+): Promise<SongPlan | null> {
   const system = instruction();
+  const userMessage = situation
+    ? `Замысел пользователя: ${request}\n\n` +
+      `Сообщение из чата, реплаем на которое попросили песню, — сама ситуация,\n` +
+      `о которой должны быть слова:\n${situation}`
+    : `Замысел пользователя: ${request}`;
 
   for (const attempt of [1, 2]) {
-    const answer = await generateWithChain(provider, models, `Замысел пользователя: ${request}`, {
+    const answer = await generateWithChain(provider, models, userMessage, {
       systemPrompt: attempt === 1 ? system : `${system}\n\nВАЖНО: ответ должен быть ровно одним JSON-объектом.`,
       temperature: 0.8,
     });

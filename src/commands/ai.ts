@@ -1686,7 +1686,7 @@ async function handleSpeak(ctx: BotContext, request: string): Promise<void> {
   if (!spec && asked) {
     const helper = findTextProvider(GEMINI_ID);
     if (helper?.isConfigured) {
-      const plan = await withChatAction(ctx, 'typing', () => planSpeech(helper, config.gemini.chains.draw, asked));
+      const plan = await withChatAction(ctx, 'typing', () => planSpeech(helper, config.gemini.chains.light, asked));
       spoken = plan.text;
       if (plan.direction) {
         voiceRequest = parseVoiceRequest(plan.direction);
@@ -1755,6 +1755,8 @@ async function handleTrack(ctx: BotContext, request: string): Promise<void> {
       'Опишите песню после «!трек». Например:\n' +
         '<code>/гем !трек грустная песня про дедлайны, женский вокал</code>\n' +
         '<code>/гем !трек полминуты весёлого чиптюна без вокала</code>\n\n' +
+        'Реплаем на сообщение — песня будет про него: ' +
+        '<code>/гем !трек песня о ситуации</code> ответом на чужую реплику.\n\n' +
         `Стиль и слова я соберу сам. Длительность можно назвать словами («секунд десять») — ` +
         (config.goapi.music.duration === config.goapi.music.maxDuration
           ? `по умолчанию и максимум ${config.goapi.music.duration} с. `
@@ -1768,8 +1770,13 @@ async function handleTrack(ctx: BotContext, request: string): Promise<void> {
   const gemini = await requireGemini(ctx);
   if (!gemini) return;
 
+  // Реплай на сообщение — «!трек песня о ситуации» — даёт сюжет песни:
+  // без этого написать про «ситуацию» решительно не из чего.
+  const replyTo = ctx.message?.reply_to_message;
+  const situation = (replyTo?.text ?? replyTo?.caption ?? '').trim() || undefined;
+
   // Шаг бесплатный: стиль по-английски, слова песни и длительность.
-  const plan = await withChatAction(ctx, 'typing', () => planSong(gemini, config.gemini.chains.draw, request));
+  const plan = await withChatAction(ctx, 'typing', () => planSong(gemini, config.gemini.chains.light, request, situation));
 
   if (!plan) {
     await ctx.reply(
@@ -1815,7 +1822,12 @@ async function handleTrack(ctx: BotContext, request: string): Promise<void> {
 
   try {
     const track = await withChatAction(ctx, 'upload_document', () =>
-      generateTrack({ stylePrompt: plan.stylePrompt, lyrics: plan.lyrics, duration }),
+      generateTrack({
+        stylePrompt: plan.stylePrompt,
+        negativeStylePrompt: plan.negativeStylePrompt,
+        lyrics: plan.lyrics,
+        duration,
+      }),
     );
 
     const left = Number.isFinite(quota.remaining) ? `, осталось на сегодня ${quota.remaining} из ${quota.limit}` : '';
