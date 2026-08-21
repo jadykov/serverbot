@@ -65,7 +65,6 @@ import { prepareVoice } from '../services/voice.js';
 import { findUser, knownUsers } from '../services/user-directory.js';
 import { clampDuration, generateTrack, isMusicConfigured, MUSIC_SETUP_HINT } from '../services/goapi-music.js';
 import { isInstrumental, planSong } from '../services/song-prompt.js';
-import { isWebSearchConfigured, searchWeb, WEB_SETUP_HINT } from '../services/openrouter-web.js';
 import { isTavilyConfigured, searchTavily, TAVILY_SETUP_HINT, type WebPage } from '../services/tavily.js';
 import { DEEP_SETUP_HINT, deepThoughtBudget, isDeepThinkConfigured, thinkDeeply } from '../services/openrouter-think.js';
 import { deepQuota, imageQuota, resetEveryQuota, trackQuota, webQuota, type DailyQuota } from '../services/daily-quota.js';
@@ -936,19 +935,10 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
    * целиком — extractPrompt подставляет реплай, только если аргументов
    * не было вовсе (см. выше), а тут они есть, просто не про сам реплай.
    *
-   * Сравнение с prompt отсекает как раз тот случай, когда extractPrompt уже
-   * взял реплай целиком за неимением своих слов, — цитировать текст сам
-   * на себя незачем. Реплай на фото/голос/документ сюда не долетает: у них
-   * свои ветки выше, они возвращаются раньше.
+   * Реплай на фото/голос/документ сюда не долетает: у них свои ветки выше,
+   * они возвращаются раньше.
    */
-  const repliedMessage = ctx.message?.reply_to_message;
-  const repliedText = repliedMessage?.text?.trim();
-  const promptWithQuote =
-    repliedText && repliedText !== prompt
-      ? repliedMessage?.from?.id === ctx.me.id
-        ? `Пользователь отвечает на твою реплику:\n«${repliedText.slice(0, 700)}»\n\nЕго вопрос: ${prompt}`
-        : `Вопрос задан реплаем на сообщение в чате:\n«${repliedText.slice(0, 700)}»\n\nВопрос: ${prompt}`
-      : prompt;
+  const promptWithQuote = buildReplyQuotePrompt(ctx, prompt, ctx.message?.reply_to_message);
 
   const chain = think ? resolveChain(THINK_CHAIN) : resolveChain(MAIN_CHAIN);
   // Формат назвали — файл будет в любом случае. Не назвали — ответ пойдёт
@@ -1264,23 +1254,15 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
 /**
  * Живой поиск: «/гем !сеть ...».
  *
- * Путей два, и первый бесплатный. Tavily — поисковый сервис, а не нейросеть:
- * он отдаёт страницы, а ответ по ним пишет обычная цепочка Gemini, та же,
- * что отвечает на любой вопрос. Денег это не стоит вовсе — тратится кредит
- * из пакета и бесплатная норма Google.
+ * Только Tavily: он отдаёт страницы, а ответ по ним пишет обычная цепочка
+ * Gemini, та же, что отвечает на любой вопрос. Денег это не стоит вовсе —
+ * тратится кредит из пакета и бесплатная норма Google.
  *
- * Второй путь, платный, — плагин OpenRouter: там поиск и ответ делает один
- * вызов (см. services/openrouter-web.ts). Он включается сам, когда Tavily
- * не может: кончились кредиты, отвалился ключ, не нашлось ни одной страницы.
- * Смысл запаса именно в этом — «!сеть» не должна переставать работать в день,
- * когда закончится бесплатный пакет.
- *
- * Порядок обратный привычному: обычно запасной путь дешевле основного,
- * а здесь наоборот, и это правильно — платить надо тогда, когда бесплатное
- * кончилось, а не наоборот.
+ * Платный запасной путь через плагин OpenRouter (services/openrouter-web.ts)
+ * пока отключён — модуль остался в коде, но handleWeb его не вызывает.
  */
 async function handleWeb(ctx: BotContext, query: string): Promise<void> {
-  if (!isTavilyConfigured() && !isWebSearchConfigured()) {
+  if (!isTavilyConfigured()) {
     await ctx.reply(`🔌 Живой поиск не подключён. ${TAVILY_SETUP_HINT}`);
     return;
   }
@@ -1311,15 +1293,11 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
   }
 
   try {
-    const answered = await withChatAction(ctx, 'typing', async () => {
-      const viaTavily = await searchWithTavily(ctx, query);
-      // Сюда добираемся, только если бесплатный путь не справился — значит
-      // и пометку о платном пути показывать есть за что.
-      return viaTavily ?? (await searchWithOpenRouter(ctx, query, isTavilyConfigured()));
-    });
+    const answered = await withChatAction(ctx, 'typing', () => searchWithTavily(ctx, query));
 
-    // Ответить не вышло ни одним путём — ни нашлось ничего, ни платный
-    // не настроен. Слот нормы возвращаем: она про полученные ответы.
+    // Ответить не вышло — ничего не нашлось или Gemini не подключён,
+    // сообщение об этом уже ушло пользователю. Слот нормы возвращаем:
+    // она про полученные ответы.
     if (answered === null) {
       await webQuota.release(userId);
       return;
@@ -1339,36 +1317,15 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
 }
 
 /**
- * Бесплатный путь: страницы от Tavily, ответ от Gemini.
+ * Страницы от Tavily, ответ пишет обычная поисковая цепочка Gemini.
  *
- * Возвращает null, если этим путём ответить не вышло, — тогда вызывающий код
- * берёт платный. Отказ Tavily здесь именно проглатывается, а не показывается:
- * человеку незачем знать, что первый поисковик не ответил, если второй ответил.
+ * Возвращает null, если ответить не вышло — ничего не нашлось или Gemini
+ * не подключён; в обоих случаях сообщение об этом уже ушло пользователю.
  */
 async function searchWithTavily(ctx: BotContext, query: string): Promise<string | null> {
-  if (!isTavilyConfigured()) return null;
-
-  let pages: WebPage[];
-  try {
-    pages = await searchTavily(query);
-  } catch (error) {
-    // Дальше пробуем платный путь — но только если он вообще настроен.
-    // Иначе честнее показать настоящую причину, а не молчать.
-    if (!isWebSearchConfigured()) throw error;
-    logger.warn('Tavily не смог, перехожу на OpenRouter', {
-      message: error instanceof Error ? error.message : String(error),
-    });
-    return null;
-  }
+  const pages = await searchTavily(query);
 
   if (pages.length === 0) {
-    // Пустая выдача — повод попробовать второй поисковик: движки у них
-    // разные, и то, чего не увидел один, вполне находит другой.
-    if (isWebSearchConfigured()) {
-      logger.info('Tavily ничего не нашёл, пробую OpenRouter');
-      return null;
-    }
-
     await ctx.reply(
       '🔍 В интернете ничего подходящего не нашлось.\n\n' +
         '<i>Попробуйте переформулировать — поиск понимает обычные слова, ' +
@@ -1378,17 +1335,8 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
     return null;
   }
 
-  /**
-   * Провайдер берём молча, а не через requireGemini: тот объясняет человеку,
-   * что Gemini не подключён, — а здесь это не конец дела, а повод перейти
-   * на платный путь, который отвечает и без Gemini. Жаловаться, а потом
-   * всё-таки ответить, было бы странно.
-   */
-  const gemini = findTextProvider(GEMINI_ID);
-  if (!gemini?.isConfigured) {
-    logger.warn('Gemini не подключён, отвечать по найденному нечем — беру OpenRouter');
-    return null;
-  }
+  const gemini = await requireGemini(ctx);
+  if (!gemini) return null;
 
   /**
    * Цепочка поисковая, а не основная: голова у них одна и та же, но резерв
@@ -1407,37 +1355,7 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
 
   await sendWebAnswer(ctx, answer.text, pages.slice(0, 5).map((page) => sourceLink(page.title, page.url)));
 
-  logger.info('Ответ с поиском отправлен', { via: 'tavily', model: answer.model, pages: pages.length });
-  return answer.text;
-}
-
-/**
- * Платный путь: поиск и ответ одним вызовом к OpenRouter.
- *
- * Параметр fellBack говорит, что сюда пришли не от хорошей жизни, а потому
- * что бесплатный Tavily не смог. Тогда под ответом появляется пометка с ценой:
- * иначе день, когда кончатся бесплатные кредиты, пройдёт незамеченным —
- * бот продолжит отвечать, просто начнёт брать деньги.
- */
-async function searchWithOpenRouter(ctx: BotContext, query: string, fellBack = false): Promise<string | null> {
-  if (!isWebSearchConfigured()) {
-    await ctx.reply(`🔌 Живой поиск не подключён. ${WEB_SETUP_HINT}`);
-    return null;
-  }
-
-  const answer = await searchWeb(query);
-  await sendWebAnswer(ctx, answer.text, answer.sources);
-
-  if (fellBack) {
-    const price = answer.costUsd ? `$${answer.costUsd.toFixed(4)}` : 'платно';
-    await ctx.reply(
-      `<i>Бесплатный поиск не ответил — искал через OpenRouter, ${price}. ` +
-        'Если так теперь каждый раз, значит кончились кредиты Tavily.</i>',
-      { parse_mode: 'HTML' },
-    );
-  }
-
-  logger.info('Ответ с поиском отправлен', { via: 'openrouter', fellBack, costUsd: answer.costUsd });
+  logger.info('Ответ с поиском отправлен', { model: answer.model, pages: pages.length });
   return answer.text;
 }
 
@@ -1928,6 +1846,34 @@ async function handleRepliedPhoto(ctx: BotContext, fileId: string, rawPrompt: st
   }
 }
 
+/** Реплай на сообщение с текстом или подписью — то, что можно процитировать. */
+type QuotableMessage = { text?: string; caption?: string; from?: { id: number } };
+
+/**
+ * Вплетает цитату реплая в вопрос, если реплай на что-то есть.
+ *
+ * Общий приём для двух мест: явного «/гем реплаем + вопрос» и обычного
+ * ответа реплаем на реплику бота (см. handleReplyToBot). Текст берём и
+ * из text, и из caption — реплай может быть на фото или голосовое с
+ * подписью, а не только на чистый текст.
+ *
+ * Сравнение с prompt отсекает случай, когда extractPrompt уже взял реплай
+ * целиком за неимением своих слов, — цитировать текст сам на себя незачем.
+ */
+function buildReplyQuotePrompt(
+  ctx: BotContext,
+  prompt: string,
+  repliedMessage: QuotableMessage | undefined,
+  ownReplyLabel: 'вопрос' | 'ответ' = 'вопрос',
+): string {
+  const repliedText = (repliedMessage?.text ?? repliedMessage?.caption ?? '').trim();
+  if (!repliedText || repliedText === prompt) return prompt;
+
+  return repliedMessage?.from?.id === ctx.me.id
+    ? `Пользователь отвечает на твою реплику:\n«${repliedText.slice(0, 700)}»\n\nЕго ${ownReplyLabel}: ${prompt}`
+    : `Вопрос задан реплаем на сообщение в чате:\n«${repliedText.slice(0, 700)}»\n\nВопрос: ${prompt}`;
+}
+
 /**
  * Ответ реплаем на сообщение бота — продолжение разговора, а не новый запрос.
  *
@@ -1940,13 +1886,11 @@ async function handleRepliedPhoto(ctx: BotContext, fileId: string, rawPrompt: st
  * топике у бота десяток реплик подряд, и без цитаты непонятно, какую именно
  * имеют в виду.
  */
-async function handleReplyToBot(ctx: BotContext, text: string, quoted: string): Promise<void> {
+async function handleReplyToBot(ctx: BotContext, text: string, repliedMessage: QuotableMessage): Promise<void> {
   const gemini = await requireGemini(ctx);
   if (!gemini) return;
 
-  const prompt = quoted
-    ? `Пользователь отвечает на твою реплику:\n«${quoted.slice(0, 700)}»\n\nЕго ответ: ${text}`
-    : text;
+  const prompt = buildReplyQuotePrompt(ctx, text, repliedMessage, 'ответ');
 
   await askChain(ctx, gemini, resolveChain(MAIN_CHAIN), prompt, { historyText: text });
 }
@@ -2241,7 +2185,7 @@ export function registerAiCommands(bot: Bot<BotContext>): void {
     // не нужна: обращение и так очевидно, причём и в группе тоже. Это
     // единственный случай, когда бот отвечает в группе на обычный текст.
     if (replyTo?.from?.id === ctx.me.id && text && !text.startsWith('/')) {
-      await handleReplyToBot(ctx, text, (replyTo.text ?? replyTo.caption ?? '').trim());
+      await handleReplyToBot(ctx, text, replyTo);
       return;
     }
 
