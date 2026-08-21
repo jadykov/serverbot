@@ -628,10 +628,10 @@ export const config = {
        *
        * Дальше порядок по запасу, а не по свежести. За двумя lite (по 500
        * запросов в сутки у каждого) идёт Gemma: она медленная, но дневная
-       * норма у неё на порядки больше, а прошлое поколение внизу выдаёт
-       * по 20 запросов на модель. Разговор от этого не прерывается там,
-       * где иначе упёрся бы в четыре десятка ответов, а 2.5 остаются
-       * последней страховкой — на случай, если и Gemma откажет.
+       * норма у неё на порядки больше, и она же последняя страховка —
+       * прошлое поколение (gemini-2.5-flash, gemini-2.5-flash-lite) убрано
+       * из всех цепочек 21.08.2026: Google отдаёт по ним 404 «no longer
+       * available to new users», перебор упирался в мёртвые звенья впустую.
        *
        * Порядок правится в .env, перекомпиляция не нужна.
        */
@@ -639,8 +639,6 @@ export const config = {
         'gemini-3.5-flash-lite',
         'gemini-3.1-flash-lite',
         'gemma-4-31b-it',
-        'gemini-2.5-flash',
-        'gemini-2.5-flash-lite',
       ]),
       /**
        * Запросы «/гем !контекст ...»: дневная квота маленькая, тратится осознанно.
@@ -669,8 +667,6 @@ export const config = {
         'gemini-3.6-flash',
         'gemini-3.5-flash',
         'gemini-3-flash-preview',
-        'gemini-2.5-flash',
-        'gemini-2.5-flash-lite',
         'gemma-4-31b-it',
       ]),
       /**
@@ -691,8 +687,6 @@ export const config = {
         'gemini-3.5-flash-lite',
         'gemini-3.1-flash-lite',
         'gemini-3-flash-preview',
-        'gemini-2.5-flash',
-        'gemini-2.5-flash-lite',
       ]),
       /**
        * Подготовка запроса к рисованию: наводящие вопросы и сборка промпта.
@@ -706,8 +700,6 @@ export const config = {
       draw: envStringList('GEMINI_CHAIN_DRAW', [
         'gemini-3.5-flash-lite',
         'gemini-3.1-flash-lite',
-        'gemini-2.5-flash',
-        'gemini-2.5-flash-lite',
         'gemma-4-31b-it',
       ]),
     },

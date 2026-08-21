@@ -1343,7 +1343,33 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
   if (!gemini) return null;
 
   const chain = resolveChain(THINK_CHAIN);
-  const answer = await generateWithChain(gemini, chain.models, buildSearchPrompt(query, pages), {
+  /**
+   * Порядок THINK_CHAIN хорош для «!контекст», но не для поиска — проверено
+   * вживую на боте 21.08.2026 тем же по весу запросом:
+   *
+   *  • gemini-3.7-flash (голова) то отказывал с 503 «high demand», то не
+   *    укладывался даже в увеличенный таймаут 150с на весе поисковых
+   *    страниц. Таймаут цепочка не перебирает (см. RETRYABLE в chain.ts) —
+   *    первая же его неудача такого рода валила весь запрос, а не шла дальше.
+   *  • gemini-3.6-flash тоже словил 503 в том же тесте.
+   *  • gemini-3.5-flash ответил 200 за 13 секунд — из проверенных моделей
+   *    единственный, кто отработал с первого раза.
+   *
+   * Ни одну модель совсем не убираем — 3.6 и 3.7 иногда вполне отвечают,
+   * а резерв ничего не стоит. Просто для поиска первым идёт проверенно
+   * доступный 3.5, а самый капризный 3.7 — почти в хвосте, но всё же
+   * перед Gemma: она настоящая модель, а не запасной вариант «на всякий
+   * случай», и заслуживает попытки раньше медленной страховки.
+   */
+  const special = ['gemini-3.5-flash', 'gemini-3.7-flash', 'gemma-4-31b-it'];
+  const models = [
+    ...(chain.models.includes('gemini-3.5-flash') ? ['gemini-3.5-flash'] : []),
+    ...chain.models.filter((model) => !special.includes(model)),
+    ...(chain.models.includes('gemini-3.7-flash') ? ['gemini-3.7-flash'] : []),
+    ...(chain.models.includes('gemma-4-31b-it') ? ['gemma-4-31b-it'] : []),
+  ];
+
+  const answer = await generateWithChain(gemini, models, buildSearchPrompt(query, pages), {
     // Потолок у THINK_CHAIN и так щедрее обычного (см. GEMINI_MAX_OUTPUT_THINK) —
     // хватает и на рассуждение, и на разбор найденных страниц. ONE_POST_RULE сюда
     // не передают — о длине с моделью договаривается WEB_ANSWER_RULE, и
