@@ -24,7 +24,9 @@ import { logger } from '../logger.js';
 import { withTimeout } from '../utils.js';
 import { hasFfmpeg, runFfmpeg } from './ffmpeg.js';
 import { translateGeminiError } from './gemini.js';
-import { ProviderRequestError } from '../types.js';
+import { generateWithChain } from './chain.js';
+import { parseJsonAnswer } from './krea-prompt.js';
+import { ProviderRequestError, type TextProvider } from '../types.js';
 
 /** Готовая озвучка. */
 export interface Speech {
@@ -148,6 +150,87 @@ export function parseVoiceRequest(spec: string): VoiceRequest {
     ...(voice ? { voice } : {}),
     ...(rest.length > 0 ? { style: rest.join(' ') } : {}),
   };
+}
+
+/** Результат свободного разбора просьбы озвучить: что сказать и как. */
+export interface SpeechPlan {
+  /** Что произнести — дословно, без пересказа. */
+  text: string;
+  /**
+   * Указания о голосе и манере, обычными словами — то же самое, что раньше
+   * приходилось печатать в кавычках. Пусто, если ничего не просили: тогда
+   * идёт голос по умолчанию без всякой манеры.
+   */
+  direction: string;
+}
+
+/**
+ * Инструкция помощнику: отделить текст от указаний, не подбирая их под
+ * готовый список голосов самому — этим следом займётся parseVoiceRequest,
+ * тот же самый разбор, что и у кавычек. Задача помощника уже проще: понять
+ * человеческую фразу, а не собрать чужой словарь.
+ */
+const SPEECH_PLAN_RULES = [
+  'Тебе прислали свободную просьбу что-то озвучить голосом в Telegram-боте.',
+  '',
+  'Раздели её на две части.',
+  '1. "text" — сам текст, который нужно произнести, слово в слово. Ничего не дописывай,',
+  '   не переписывай и не превращай в вежливую просьбу — бери ровно те слова, что должны прозвучать.',
+  '2. "direction" — указания о том, КАК это сказать: голос, пол, манера, интонация,',
+  '   если их вообще просили. Перескажи их своими словами, как в исходной просьбе —',
+  '   не подбирай под какой-то готовый список, этим займутся дальше. Не просили — пустая строка.',
+  '',
+  'Пример: «скажи низким голосом испуганным шёпотом: они уже близко» →',
+  '{"text":"они уже близко","direction":"низкий голос, испуганный шёпот"}',
+  '',
+  'Пример без указаний: «скажи всем что летучка перенесена на три» →',
+  '{"text":"всем, летучка перенесена на три","direction":""}',
+  '',
+  'Ответь строго одним JSON-объектом без пояснений: {"text":"...","direction":"..."}',
+].join('\n');
+
+/** Разбирает ответ модели. null — разобрать не вышло, стоит попробовать снова. */
+function toSpeechPlan(text: string, fallback: string): SpeechPlan | null {
+  try {
+    const parsed = parseJsonAnswer(text) as { text?: unknown; direction?: unknown };
+    const spoken = typeof parsed.text === 'string' ? parsed.text.trim() : '';
+
+    return {
+      text: spoken || fallback,
+      direction: typeof parsed.direction === 'string' ? parsed.direction.trim() : '',
+    };
+  } catch (error) {
+    logger.debug('Ответ помощника озвучки не разобрался как JSON', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+/**
+ * Разбирает свободную просьбу озвучить — без обязательных кавычек.
+ *
+ * Используется, только когда кавычек в запросе нет: с кавычками разбор
+ * бесплатный и мгновенный (VOICE_SPEC + parseVoiceRequest в src/commands/ai.ts),
+ * а сюда, к лёгкой модели, попадает лишь то, что кавычками не описали.
+ * Не разобрался дважды — просто читаем запрос как есть, без голоса и манеры:
+ * молчать об этом хуже, чем прочитать чуть иначе, чем хотели.
+ */
+export async function planSpeech(provider: TextProvider, models: string[], request: string): Promise<SpeechPlan> {
+  for (const attempt of [1, 2] as const) {
+    const answer = await generateWithChain(provider, models, request, {
+      systemPrompt:
+        attempt === 1 ? SPEECH_PLAN_RULES : `${SPEECH_PLAN_RULES}\n\nВАЖНО: ответ должен быть ровно одним JSON-объектом.`,
+      temperature: 0.3,
+    });
+
+    const plan = toSpeechPlan(answer.text, request);
+    if (plan) return plan;
+
+    logger.warn('Помощник озвучки вернул не JSON, пробую ещё раз', { attempt });
+  }
+
+  return { text: request, direction: '' };
 }
 
 const PROVIDER_ID = 'gemini-tts';

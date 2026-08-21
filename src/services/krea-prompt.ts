@@ -67,8 +67,12 @@ const KREA_RULES = [
   'Промпт должен быть коротким: одно-два предложения, не длиннее 60 слов.',
 ].join('\n');
 
-/** Достаёт JSON из ответа модели: она любит завернуть его в ```json … ```. */
-function parseJsonAnswer(text: string): unknown {
+/**
+ * Достаёт JSON из ответа модели: она любит завернуть его в ```json … ```.
+ * Экспортирована — тот же разбор нужен и src/services/gemini-tts.ts для
+ * свободного разбора просьбы озвучить (planSpeech).
+ */
+export function parseJsonAnswer(text: string): unknown {
   // Заборы из обратных кавычек убираем везде, а не только по краям:
   // модель иногда дописывает пояснение и до объекта, и после него.
   const withoutFence = text.replace(/```(?:json)?/gi, ' ').trim();
