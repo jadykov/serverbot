@@ -281,6 +281,31 @@ const MEDIA_COMMAND = /^\/(?:гем|gem)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/
 const FORGOTTEN_BANG = /^(?:нарисуй|контекст|скажи|найди|найти|расшифруй|трек|песня|сеть|погугли|размышление)(?:[\s,:.—–-]|$)/i;
 
 /**
+ * Слова-переключатели ещё и отдельными командами: «/нарисуй кота» вместо
+ * «/гем !нарисуй кота». Ни справку, ни сами слова-переключатели это не меняет —
+ * это просто ещё один вход в тот же handleGemini с тем же текстом, который
+ * получился бы после «/гем»: восклицательный знак здесь не нужен ровно
+ * по той же причине, по которой не нужен он и самому «/гем», — слово стоит
+ * после «/», спутать его с обычной репликой уже нельзя.
+ *
+ * canonical — какое из слов группы подставить в реконструированный текст;
+ * какое именно взяли, не важно, switchWord() в handleGemini понимает
+ * все альтернативы группы одинаково.
+ */
+const ALIAS_COMMANDS: ReadonlyArray<{ words: string; canonical: string }> = [
+  { words: 'контекст', canonical: 'контекст' },
+  { words: 'нарисуй', canonical: 'нарисуй' },
+  { words: 'скажи', canonical: 'скажи' },
+  { words: 'трек|песня', canonical: 'трек' },
+  { words: 'файл', canonical: 'файл' },
+  { words: 'расшифруй|послушай', canonical: 'расшифруй' },
+  { words: 'личка|лс', canonical: 'личка' },
+  { words: 'найди|найти', canonical: 'найди' },
+  { words: 'сеть|интернет|гугл|погугли', canonical: 'сеть' },
+  { words: 'размышление', canonical: 'размышление' },
+];
+
+/**
  * Вопрос о самом боте: «что ты умеешь», «как тобой пользоваться» и подобное.
  *
  * Модель ничего не знает о собственных командах — в её роли (DEFAULT_ROLE
@@ -2123,6 +2148,28 @@ export function registerAiCommands(bot: Bot<BotContext>): void {
 
     await handleGemini(ctx, extractPrompt(ctx, match?.[2] ?? ''));
   });
+
+  // ---------------------------------------------- алиасы слов-переключателей
+  // «/нарисуй кота» и подобные — см. ALIAS_COMMANDS выше.
+  for (const { words, canonical } of ALIAS_COMMANDS) {
+    const pattern = new RegExp(`^\\/(?:${words})(?:@([A-Za-z0-9_]+))?(?:\\s+([\\s\\S]*))?$`, 'i');
+
+    bot.hears(pattern, async (ctx, next) => {
+      const match = typeof ctx.match === 'string' ? null : ctx.match;
+      const addressee = match?.[1];
+
+      // В группе может быть несколько ботов: «/нарисуй@другой_бот» — не наше дело.
+      if (addressee && addressee.toLowerCase() !== ctx.me.username.toLowerCase()) return;
+
+      // Та же логика, что и у «/гем»: подпись к фото/голосовому разбирает
+      // соответствующий обработчик, а не эта ветка.
+      if (ctx.message?.photo) return next();
+      if (ctx.message?.voice) return next();
+
+      const rest = match?.[2]?.trim();
+      await handleGemini(ctx, rest ? `!${canonical} ${rest}` : `!${canonical}`);
+    });
+  }
 
   // ------------------------------------------------------------ картинки
   // Альбом Telegram присылает несколькими апдейтами с общим media_group_id:
