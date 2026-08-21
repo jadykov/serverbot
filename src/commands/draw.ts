@@ -10,12 +10,12 @@
  * «Подумать» (GEMINI_CHAIN_THINK — картинка дороже лишних секунд на более
  * умную модель): он смотрит, чего в запросе не хватает, готовит до пяти
  * вопросов и собирает промпт по правилам Krea (см. src/services/krea-prompt.ts).
- * Сколько из готовых вопросов реально задать — 1..N — выбирает сам человек
- * на экране-слайдере между замыслом и первым вопросом; самые важные вопросы
- * модель ставит первыми, так что даже «1» — это не наугад. Деньги тратятся
- * только по явному нажатию «Рисовать», и промпт уходит с низкой креативностью
- * (KREA_CREATIVITY_REFINED) — договорились об одном, значит рисуем в основном
- * это, с минимальной дорисовкой.
+ * Задаются они все подряд, с первого — без промежуточного экрана «сколько
+ * отвечать»: такой экран только добавлял шаг между вопросом и ответом,
+ * а модель и так ставит их по важности, от главного к второстепенному.
+ * Деньги тратятся только по явному нажатию «Рисовать», и промпт уходит
+ * с низкой креативностью (KREA_CREATIVITY_REFINED) — договорились об одном,
+ * значит рисуем в основном это, с минимальной дорисовкой.
  *
  * Там же, на экране подтверждения, выбирается форма картинки: набор кнопок
  * из тех пропорций, которые понимает модель. Свободного ввода нет намеренно —
@@ -124,34 +124,6 @@ function questionKeyboard(step: number, options: string[]): InlineKeyboard {
 }
 
 /**
- * Текст экрана выбора количества уточнений: модель уже насчитала вопросы,
- * человек решает, сколько из них реально задать.
- */
-function sliderText(draft: DrawDraft): string {
-  const total = draft.questions.length;
-
-  return [
-    `🎨 <b>${escapeHtml(draft.original)}</b>`,
-    '',
-    `Чтобы попасть точнее, можно уточнить до ${total} деталей — ` +
-      'самые важные модель задаст первыми. Сколько уточнить?',
-  ].join('\n');
-}
-
-/**
- * Клавиатура-слайдер: по кнопке на каждое число от 1 до total. Выбор режет
- * список вопросов сразу — дальше идёт обычный опрос по уже укороченному
- * списку, без нового понятия в состоянии черновика.
- */
-function sliderKeyboard(total: number): InlineKeyboard {
-  const keyboard = new InlineKeyboard();
-  for (let count = 1; count <= total; count++) {
-    keyboard.text(`${count}/${total}`, `${CB}:n:${count}`);
-  }
-  return keyboard;
-}
-
-/**
  * Клавиатура подтверждения — единственное место, где тратятся деньги.
  *
  * Формы идут первыми и по четыре в ряд: их семь, в одну строку они
@@ -230,15 +202,9 @@ export async function startDraw(ctx: BotContext, request: string): Promise<void>
   }
 
   // Скобки и «masterpiece» из мира Stable Diffusion Krea читает как обычный
-  // текст и рисует их содержимое буквально — убираем и говорим об этом.
-  const { cleaned, removed } = stripStableDiffusionSyntax(request);
-  if (removed) {
-    await ctx.reply(
-      '<i>Убрал из запроса веса и слова вроде «8k, masterpiece»: Krea 2 читает их как обычный текст, ' +
-        'а не как указания. Стиль лучше задавать словами.</i>',
-      { parse_mode: 'HTML' },
-    );
-  }
+  // текст и рисует их содержимое буквально — убираем молча, без отдельного
+  // сообщения об этом: человеку это ни на что не влияет и только спамит чат.
+  const { cleaned } = stripStableDiffusionSyntax(request);
 
   // Выключатель на случай, если разговоры надоели: рисуем сразу, как раньше.
   // Некому вести разговор (Gemini не настроен) — та же ветка: без картинки
@@ -266,16 +232,10 @@ export async function startDraw(ctx: BotContext, request: string): Promise<void>
     return;
   }
 
-  // Вопрос ровно один — выбирать не из чего, сразу к нему.
-  if (draft.questions.length === 1) {
-    setDraft(ctx, draft);
-    await ctx.reply(questionText(draft), { parse_mode: 'HTML', reply_markup: questionKeyboard(0, draft.questions[0]!.options) });
-    return;
-  }
-
-  // Вопросов несколько — человек сам решает, сколько из них отвечать.
+  // Есть вопросы — сразу к первому, без промежуточного выбора «сколько
+  // отвечать»: неважно, один их или пять, начинаем с 1/N и идём по порядку.
   setDraft(ctx, draft);
-  await ctx.reply(sliderText(draft), { parse_mode: 'HTML', reply_markup: sliderKeyboard(draft.questions.length) });
+  await ctx.reply(questionText(draft), { parse_mode: 'HTML', reply_markup: questionKeyboard(0, draft.questions[0]!.options) });
 }
 
 function emptyDraft(request: string): DrawDraft {
@@ -392,33 +352,6 @@ export function registerDrawCommands(bot: Bot<BotContext>): void {
     await ctx.editMessageText(questionText(draft), {
       parse_mode: 'HTML',
       reply_markup: questionKeyboard(draft.step, draft.questions[draft.step]!.options),
-    });
-  });
-
-  // Выбор количества уточнений на экране-слайдере: обрезаем список вопросов
-  // до выбранного числа и идём по нему как по обычному опросу.
-  bot.callbackQuery(new RegExp(`^${CB}:n:(\\d+)$`), async (ctx) => {
-    const draft = getDraft(ctx);
-    if (!draft) {
-      await ctx.answerCallbackQuery({ text: 'Этот черновик уже не действует — начните заново.', show_alert: true });
-      return;
-    }
-
-    const [, countRaw] = ctx.match as RegExpMatchArray;
-    const count = Number(countRaw);
-
-    if (!Number.isInteger(count) || count < 1 || count > draft.questions.length) {
-      await ctx.answerCallbackQuery({ text: 'Кнопка устарела.', show_alert: true });
-      return;
-    }
-
-    await ctx.answerCallbackQuery({ text: `${count}/${draft.questions.length}` });
-
-    draft.questions = draft.questions.slice(0, count);
-    setDraft(ctx, draft);
-    await ctx.editMessageText(questionText(draft), {
-      parse_mode: 'HTML',
-      reply_markup: questionKeyboard(0, draft.questions[0]!.options),
     });
   });
 
