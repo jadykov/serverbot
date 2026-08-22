@@ -39,7 +39,7 @@ import type { BotContext } from '../types.js';
  * тут не помогает, только удлиняет строку. Поэтому вместо моноширинного
  * <pre>-блока каждая команда даётся как пример: жирным — то, что набирают
  * буквально, курсивом — слово-плейсхолдер на месте своих слов, а описание —
- * отдельной строкой ниже, с отступом и тоже курсивом, чтобы не спорить
+ * отдельной строкой ниже, с отступом, тире и тоже курсивом, чтобы не спорить
  * весом с командой сверху. Отступ пробелами вне <pre> не ломается: Telegram
  * их не схлопывает, просто шрифт там не моноширинный, и колонка не нужна —
  * нужен только сдвиг вправо.
@@ -71,7 +71,7 @@ const MAIN_COMMANDS: ReadonlyArray<{ command: string; arg?: string; description:
 function formatCommandList(rows: typeof MAIN_COMMANDS): string[] {
   return rows.flatMap(({ command, arg, description }) => [
     arg ? `<b>${escapeHtml(command)}</b> <i>${escapeHtml(arg)}</i>` : `<b>${escapeHtml(command)}</b>`,
-    `  <i>${escapeHtml(description)}</i>`,
+    `  — <i>${escapeHtml(description)}</i>`,
   ]);
 }
 
