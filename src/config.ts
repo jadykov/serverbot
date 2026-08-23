@@ -484,7 +484,7 @@ export const config = {
    * а не на пересказ пересказа.
    */
   spontaneous: {
-    enabled: envBool('SPONTANEOUS_ENABLED', true),
+    enabled: envBool('SPONTANEOUS_ENABLED', false),
     /**
      * Модель — намеренно самая лёгкая и та же, что голова обычной цепочки:
      * фичи ради настроения незачем тратить на неё что-то посильнее.
