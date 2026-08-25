@@ -1100,6 +1100,109 @@ const WEB_ANSWER_RULE = [
   'Своего списка источников не составляй и ссылки в текст не вставляй — их допишет бот.',
 ].join(' ');
 
+/**
+ * «!сеть» про новости конкретного города: «новости о Йошкар-Оле», «новости
+ * в Казани», «казань новости» и т.п. — для таких запросов поиск точнее,
+ * если рядом с городом явно указан его регион (округ, штат, республика…)
+ * и жёстко ограничены даты — иначе Tavily охотно тащит новости недельной
+ * давности вперемешку со свежими.
+ *
+ * Регион по названию города не хранится словарём — городов в мире слишком
+ * много, а держать актуальный список нереально. Вместо этого перед самим
+ * поиском в Tavily идёт отдельный короткий вызов Gemini: не за поиском
+ * (бесплатных ключей с поиском у Gemini нет, это забота Tavily), а просто
+ * «в каком регионе город X» — по собственным знаниям модели, без инструментов.
+ * Не про новости города — модель отвечает {"city":null}, и запрос уходит
+ * в Tavily как есть, без единой правки. Так же — если распознать не вышло
+ * (таймаут, не JSON, провайдер не настроен): деградация мягкая, ни на что,
+ * кроме этого частного случая, не влияет.
+ */
+const NEWS_WORD = /новост/i;
+
+const CITY_NEWS_SYSTEM_PROMPT = [
+  'Ты определяешь, просит ли пользователь свежие новости именно про конкретный город',
+  '(а не про страну, компанию, персону, технологию, продукт и т.п.).',
+  'Если да — ответь строго одной строкой JSON без пояснений и без разметки кода:',
+  '{"city":"<город в именительном падеже, как правильно пишется по-русски>",',
+  '"region":"<регион, к которому относится город, короткой фразой с предлогом для вставки в текст,',
+  'например \'в республике Марий Эл\', \'в штате Техас\', \'в провинции Гуандун\';',
+  'если у города нет вышестоящего региона (город федерального значения вроде Москвы',
+  'или город-государство) — пустая строка \'\'>"}.',
+  'Если запрос не про новости конкретного города — ответь строго: {"city":null}.',
+  'Никакого другого текста в ответе быть не должно.',
+].join(' ');
+
+interface CityNewsLookup {
+  city: string;
+  region: string;
+}
+
+/** Разбирает ответ модели на попытку распознать город. null — не подошло или не распозналось. */
+function parseCityNewsLookup(raw: string): CityNewsLookup | null {
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+
+  try {
+    const parsed: unknown = JSON.parse(match[0]);
+    if (typeof parsed !== 'object' || parsed === null) return null;
+
+    const { city, region } = parsed as { city?: unknown; region?: unknown };
+    if (typeof city !== 'string' || !city.trim()) return null;
+
+    return { city: city.trim(), region: typeof region === 'string' ? region.trim() : '' };
+  } catch {
+    return null;
+  }
+}
+
+/** «24–25 августа» либо, на стыке месяцев (и года), «31 июля – 1 августа». */
+function newsDateRange(): string {
+  const timeZone = config.webQuota.timezone;
+  const now = new Date();
+  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+  const day = (date: Date) => new Intl.DateTimeFormat('ru-RU', { day: 'numeric', timeZone }).format(date);
+  const month = (date: Date) => new Intl.DateTimeFormat('ru-RU', { month: 'long', timeZone }).format(date);
+  const year = (date: Date) => new Intl.DateTimeFormat('ru-RU', { year: 'numeric', timeZone }).format(date);
+
+  if (month(yesterday) === month(now) && year(yesterday) === year(now)) {
+    return `${day(yesterday)}–${day(now)} ${month(now)}`;
+  }
+
+  const yesterdayYear = year(yesterday) !== year(now) ? ` ${year(yesterday)}` : '';
+  return `${day(yesterday)} ${month(yesterday)}${yesterdayYear} – ${day(now)} ${month(now)} ${year(now)}`;
+}
+
+/**
+ * Если запрос — про новости конкретного города, переписывает его в точную
+ * форму «новости о городе X в <регионе> на <вчера–сегодня>». Любой другой
+ * запрос (в том числе непонятный) возвращает как есть.
+ */
+async function maybeRewriteCityNewsQuery(gemini: TextProvider, query: string): Promise<string> {
+  if (!NEWS_WORD.test(query)) return query;
+
+  try {
+    const chain = resolveChain(MAIN_CHAIN);
+    const { text } = await generateWithChain(gemini, chain.models, query, {
+      systemPrompt: CITY_NEWS_SYSTEM_PROMPT,
+      rawSystemPrompt: true,
+      maxOutputTokens: 200,
+      timeoutMs: 15000,
+    });
+
+    const lookup = parseCityNewsLookup(text);
+    if (!lookup) return query;
+
+    const regionPart = lookup.region ? ` ${lookup.region}` : '';
+    return `новости о городе ${lookup.city}${regionPart} на ${newsDateRange()}`;
+  } catch (error) {
+    logger.warn('Не удалось распознать город для новостного поиска — ищу запрос как есть', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return query;
+  }
+}
+
 /** Складывает найденные страницы в запрос к модели. */
 function buildSearchPrompt(query: string, pages: WebPage[]): string {
   const found = pages
@@ -1347,7 +1450,10 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
  * не подключён; в обоих случаях сообщение об этом уже ушло пользователю.
  */
 async function searchWithTavily(ctx: BotContext, query: string): Promise<string | null> {
-  const pages = await searchTavily(query);
+  const lookupProvider = findTextProvider(GEMINI_ID);
+  const effectiveQuery = lookupProvider?.isConfigured ? await maybeRewriteCityNewsQuery(lookupProvider, query) : query;
+
+  const pages = await searchTavily(effectiveQuery);
 
   if (pages.length === 0) {
     await ctx.reply(
@@ -1389,7 +1495,7 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
     ...(chain.models.includes('gemma-4-31b-it') ? ['gemma-4-31b-it'] : []),
   ];
 
-  const answer = await generateWithChain(gemini, models, buildSearchPrompt(query, pages), {
+  const answer = await generateWithChain(gemini, models, buildSearchPrompt(effectiveQuery, pages), {
     // Потолок у THINK_CHAIN и так щедрее обычного (см. GEMINI_MAX_OUTPUT_THINK) —
     // хватает и на рассуждение, и на разбор найденных страниц. ONE_POST_RULE сюда
     // не передают — о длине с моделью договаривается WEB_ANSWER_RULE, и
