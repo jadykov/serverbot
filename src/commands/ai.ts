@@ -1205,7 +1205,10 @@ async function maybeRewriteCityNewsQuery(gemini: TextProvider, query: string): P
       systemPrompt: CITY_NEWS_SYSTEM_PROMPT,
       rawSystemPrompt: true,
       maxOutputTokens: 200,
-      timeoutMs: 15000,
+      // 15с оказалось мало: на боте 25.08.2026 gemini-3.5-flash-lite ловила
+      // таймаут в половине запросов, и лукап тихо откатывался на поиск без
+      // региона и дат — при том, что сам вызов лёгкий и почти всегда быстрый.
+      timeoutMs: 25000,
     });
 
     const lookup = parseCityNewsLookup(text);
