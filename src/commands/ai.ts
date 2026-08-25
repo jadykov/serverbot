@@ -1155,6 +1155,24 @@ function parseCityNewsLookup(raw: string): CityNewsLookup | null {
   }
 }
 
+/** Только буквы и цифры в нижнем регистре — для сравнения без падежей и дефисов. */
+function normalizeForMatch(text: string): string {
+  return text.toLowerCase().replace(/[^a-zа-яё0-9]/gi, '');
+}
+
+/**
+ * Правда ли, что этот город реально упомянут в запросе, а не придуман моделью.
+ * Падежные окончания («Казань» → «Казани») не совпадают буквально, поэтому
+ * сравниваются не целиком, а по основе — без последних двух букв.
+ */
+function cityMentionedInQuery(city: string, query: string): boolean {
+  const normalizedCity = normalizeForMatch(city);
+  if (!normalizedCity) return false;
+
+  const stem = normalizedCity.length > 5 ? normalizedCity.slice(0, -2) : normalizedCity;
+  return normalizeForMatch(query).includes(stem);
+}
+
 /** «24–25 августа» либо, на стыке месяцев (и года), «31 июля – 1 августа». */
 function newsDateRange(): string {
   const timeZone = config.webQuota.timezone;
@@ -1192,6 +1210,17 @@ async function maybeRewriteCityNewsQuery(gemini: TextProvider, query: string): P
 
     const lookup = parseCityNewsLookup(text);
     if (!lookup) return query;
+
+    // Подстраховка от галлюцинации: модель обязана называть только то, что
+    // реально написано в запросе, но если вдруг подставила город от себя —
+    // «новости о новых играх» не должны превращаться в новости условной Игры.
+    if (!cityMentionedInQuery(lookup.city, query)) {
+      logger.warn('Gemini назвал город, которого нет в запросе, — похоже на галлюцинацию, ищу как есть', {
+        query,
+        city: lookup.city,
+      });
+      return query;
+    }
 
     const regionPart = lookup.region ? ` ${lookup.region}` : '';
     return `новости о городе ${lookup.city}${regionPart} на ${newsDateRange()}`;
