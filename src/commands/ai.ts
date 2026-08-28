@@ -50,7 +50,7 @@ import { GrammyError, InputFile, type Bot } from 'grammy';
 import { config, isAdmin } from '../config.js';
 import { logger } from '../logger.js';
 import { findTextProvider } from '../services/registry.js';
-import { escapeHtml, markdownToTelegramHtml, MESSAGE_LIMIT, splitMarkdown } from '../format.js';
+import { escapeHtml, markdownToTelegramHtml, splitMarkdown } from '../format.js';
 import { sessionKey, today, withChatAction } from '../utils.js';
 import { collectAlbumPart, downloadAttachment, pickPhotoFileId } from '../media.js';
 import { generateWithChain } from '../services/chain.js';
@@ -1250,18 +1250,29 @@ function sourcesBlock(links: string[]): string {
 }
 
 /**
- * Отправляет ответ поиска вместе со ссылками — ровно одним сообщением.
+ * Отправляет ответ поиска вместе со ссылками.
  *
- * Место под ссылки считается заранее и вычитается из лимита: они идут
- * последними, и при обрезке по границе сообщения пропали бы первыми — а ради
- * них поиск и затевался. Ответ метит под самое сообщение, так что запас
- * «как-нибудь влезет» тут больше не работает.
+ * Раньше не влезший ответ обрезался по границе сообщения — и вместе с ним
+ * обрезались ссылки в конце, ради которых поиск и затевался, а сам текст
+ * мог оборваться на полуслове. Теперь как у обычного ответа (см. sendAnswer):
+ * не влез целиком — уезжает .md-файлом целиком, вместе с источниками.
  */
-async function sendWebAnswer(ctx: BotContext, text: string, links: string[]): Promise<void> {
-  const sources = sourcesBlock(links);
-  const [first = ''] = splitMarkdown(text, MESSAGE_LIMIT - sources.length);
+async function sendWebAnswer(ctx: BotContext, text: string, links: string[], query: string): Promise<void> {
+  const full = text + sourcesBlock(links);
+  const [first = '', ...rest] = splitMarkdown(full);
 
-  await sendMarkdown(ctx, first + sources);
+  if (rest.length === 0) {
+    await sendMarkdown(ctx, first);
+    return;
+  }
+
+  await sendAnswerAsFile(
+    ctx,
+    full,
+    defaultAnswerFormat(),
+    query,
+    'Ответ не влез в сообщение, поэтому приехал файлом — целиком.',
+  );
 }
 
 /** Заголовок страницы, обрезанный до разумной для ссылки длины. */
@@ -1538,7 +1549,12 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
     timeoutMs: config.ai.webTimeoutMs,
   });
 
-  await sendWebAnswer(ctx, answer.text, pages.slice(0, 5).map((page) => sourceLink(page.title, page.url)));
+  await sendWebAnswer(
+    ctx,
+    answer.text,
+    pages.slice(0, 5).map((page) => sourceLink(page.title, page.url)),
+    effectiveQuery,
+  );
 
   logger.info('Ответ с поиском отправлен', { model: answer.model, pages: pages.length });
   return answer.text;
