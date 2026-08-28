@@ -66,7 +66,13 @@ import { prepareVoice } from '../services/voice.js';
 import { findUser, knownUsers } from '../services/user-directory.js';
 import { clampDuration, generateTrack, isMusicConfigured, MUSIC_SETUP_HINT } from '../services/goapi-music.js';
 import { isInstrumental, planSong } from '../services/song-prompt.js';
-import { isTavilyConfigured, searchTavily, TAVILY_SETUP_HINT, type WebPage } from '../services/tavily.js';
+import {
+  isTavilyConfigured,
+  searchTavily,
+  TAVILY_SETUP_HINT,
+  type SearchOptions,
+  type WebPage,
+} from '../services/tavily.js';
 import { DEEP_SETUP_HINT, deepThoughtBudget, isDeepThinkConfigured, thinkDeeply } from '../services/openrouter-think.js';
 import { deepQuota, imageQuota, resetEveryQuota, trackQuota, webQuota, type DailyQuota } from '../services/daily-quota.js';
 import { handleFile, sendAnswerAsFile, takeAnswerFormat, type AnswerFormat } from './file.js';
@@ -1148,8 +1154,18 @@ function newsFinalRule(charBudget: number): string {
  * «!сеть» про новости конкретного города: «новости о Йошкар-Оле», «новости
  * в Казани», «казань новости» и т.п. — для таких запросов поиск точнее,
  * если рядом с городом явно указан его регион (округ, штат, республика…)
- * и жёстко ограничены даты — иначе Tavily охотно тащит новости недельной
- * давности вперемешку со свежими.
+ * и включён настоящий фильтр Tavily по свежести — topic: 'news' + days.
+ *
+ * Раньше вместо этого в текст запроса подставлялась дата словами («новости
+ * о городе Казань на 27–28 августа»), но это не фильтр, а просто ещё одни
+ * слова в поисковой строке. На малолюдных городах это работало случайно —
+ * свежего материала мало, и то, что Tavily находил, обычно и было свежим.
+ * На крупных городах (Казань, Москва) объём материалов огромен, ранжирование
+ * по релевантности вытаскивало страницы, вообще не датированные нужными
+ * днями, — и первый проход честно отвечал «нет данных за эти два дня»,
+ * хотя свежие новости в интернете были. Настоящий фильтр Tavily такую
+ * путаницу не даёт: он отбирает по фактической дате публикации, а не
+ * по совпадению слов.
  *
  * Регион по названию города не хранится словарём — городов в мире слишком
  * много, а держать актуальный список нереально. Вместо этого перед самим
@@ -1162,6 +1178,9 @@ function newsFinalRule(charBudget: number): string {
  * кроме этого частного случая, не влияет.
  */
 const NEWS_WORD = /новост/i;
+
+/** Сколько дней назад разрешено искать новости города (Tavily-параметр days при topic: 'news'). */
+const CITY_NEWS_DAYS = 7;
 
 const CITY_NEWS_SYSTEM_PROMPT = [
   'Ты определяешь, просит ли пользователь свежие новости именно про конкретный город',
@@ -1217,31 +1236,20 @@ function cityMentionedInQuery(city: string, query: string): boolean {
   return normalizeForMatch(query).includes(stem);
 }
 
-/** «24–25 августа» либо, на стыке месяцев (и года), «31 июля – 1 августа». */
-function newsDateRange(): string {
-  const timeZone = config.webQuota.timezone;
-  const now = new Date();
-  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-
-  const day = (date: Date) => new Intl.DateTimeFormat('ru-RU', { day: 'numeric', timeZone }).format(date);
-  const month = (date: Date) => new Intl.DateTimeFormat('ru-RU', { month: 'long', timeZone }).format(date);
-  const year = (date: Date) => new Intl.DateTimeFormat('ru-RU', { year: 'numeric', timeZone }).format(date);
-
-  if (month(yesterday) === month(now) && year(yesterday) === year(now)) {
-    return `${day(yesterday)}–${day(now)} ${month(now)}`;
-  }
-
-  const yesterdayYear = year(yesterday) !== year(now) ? ` ${year(yesterday)}` : '';
-  return `${day(yesterday)} ${month(yesterday)}${yesterdayYear} – ${day(now)} ${month(now)} ${year(now)}`;
+/** Результат разбора запроса на поиск: сам запрос и опции для Tavily поверх умолчаний. */
+interface ResolvedWebSearch {
+  query: string;
+  options: SearchOptions;
 }
 
 /**
  * Если запрос — про новости конкретного города, переписывает его в точную
- * форму «новости о городе X в <регионе> на <вчера–сегодня>». Любой другой
- * запрос (в том числе непонятный) возвращает как есть.
+ * форму «новости о городе X в <регионе>» и включает настоящий фильтр Tavily
+ * по свежести (topic: 'news', days: CITY_NEWS_DAYS). Любой другой запрос
+ * (в том числе непонятный) возвращает как есть, без дополнительных опций.
  */
-async function maybeRewriteCityNewsQuery(gemini: TextProvider, query: string): Promise<string> {
-  if (!NEWS_WORD.test(query)) return query;
+async function maybeRewriteCityNewsQuery(gemini: TextProvider, query: string): Promise<ResolvedWebSearch> {
+  if (!NEWS_WORD.test(query)) return { query, options: {} };
 
   try {
     const chain = resolveChain(MAIN_CHAIN);
@@ -1256,7 +1264,7 @@ async function maybeRewriteCityNewsQuery(gemini: TextProvider, query: string): P
     });
 
     const lookup = parseCityNewsLookup(text);
-    if (!lookup) return query;
+    if (!lookup) return { query, options: {} };
 
     // Подстраховка от галлюцинации: модель обязана называть только то, что
     // реально написано в запросе, но если вдруг подставила город от себя —
@@ -1266,16 +1274,19 @@ async function maybeRewriteCityNewsQuery(gemini: TextProvider, query: string): P
         query,
         city: lookup.city,
       });
-      return query;
+      return { query, options: {} };
     }
 
     const regionPart = lookup.region ? ` ${lookup.region}` : '';
-    return `новости о городе ${lookup.city}${regionPart} на ${newsDateRange()}`;
+    return {
+      query: `новости о городе ${lookup.city}${regionPart}`,
+      options: { topic: 'news', days: CITY_NEWS_DAYS },
+    };
   } catch (error) {
     logger.warn('Не удалось распознать город для новостного поиска — ищу запрос как есть', {
       error: error instanceof Error ? error.message : String(error),
     });
-    return query;
+    return { query, options: {} };
   }
 }
 
@@ -1554,12 +1565,18 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
  *
  * Возвращает null, если ответить не вышло — ничего не нашлось или Gemini
  * не подключён; в обоих случаях сообщение об этом уже ушло пользователю.
+ *
+ * Глубина поиска здесь — advanced (2 кредита вместо 1): группа маленькая,
+ * а норма поисков в день на человека и так ограничивает расход, так что
+ * платить вдвое за заметно точнее подобранные страницы того стоит.
  */
 async function searchWithTavily(ctx: BotContext, query: string): Promise<string | null> {
   const lookupProvider = findTextProvider(GEMINI_ID);
-  const effectiveQuery = lookupProvider?.isConfigured ? await maybeRewriteCityNewsQuery(lookupProvider, query) : query;
+  const resolved = lookupProvider?.isConfigured
+    ? await maybeRewriteCityNewsQuery(lookupProvider, query)
+    : { query, options: {} };
 
-  const pages = await searchTavily(effectiveQuery);
+  const pages = await searchTavily(resolved.query, { depth: 'advanced', ...resolved.options });
 
   if (pages.length === 0) {
     await ctx.reply(
@@ -1603,7 +1620,7 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
 
   // Первый проход: чистая фактическая выжимка по найденным страницам,
   // без своих рассуждений (см. NEWS_DIGEST_RULE).
-  const digest = await generateWithChain(gemini, models, buildSearchPrompt(effectiveQuery, pages), {
+  const digest = await generateWithChain(gemini, models, buildSearchPrompt(resolved.query, pages), {
     // Потолок у THINK_CHAIN и так щедрее обычного (см. GEMINI_MAX_OUTPUT_THINK) —
     // хватает и на рассуждение, и на разбор найденных страниц.
     maxOutputTokens: chain.maxOutputTokens,
@@ -1620,7 +1637,7 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
 
   // Второй проход: финальный ответ по выжимке, дополненный пониманием —
   // в этом смысл живого поиска (см. newsFinalRule).
-  const answer = await generateWithChain(gemini, models, buildNewsFinalPrompt(effectiveQuery, digest.text), {
+  const answer = await generateWithChain(gemini, models, buildNewsFinalPrompt(resolved.query, digest.text), {
     maxOutputTokens: chain.maxOutputTokens,
     extraInstruction: newsFinalRule(Math.max(charBudget, 0)),
     timeoutMs: config.ai.webTimeoutMs,

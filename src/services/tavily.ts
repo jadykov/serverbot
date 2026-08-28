@@ -66,6 +66,13 @@ export interface SearchOptions {
    * значения при этом остаются главнее — автоматика только дополняет.
    */
   autoParameters?: boolean;
+  /**
+   * general (умолчание Tavily) или news — второй включает настоящий фильтр
+   * по свежести на стороне Tavily, а не текстовую подсказку в запросе.
+   */
+  topic?: string;
+  /** Сколько дней назад от сегодня искать. Работает только вместе с topic: 'news'. */
+  days?: number;
 }
 
 /**
@@ -119,6 +126,8 @@ export async function searchTavily(query: string, options: SearchOptions = {}): 
         // в том, что нам важно, не стоит.
         chunks_per_source: 3,
         ...(options.autoParameters ? { auto_parameters: true } : {}),
+        ...(options.topic ? { topic: options.topic } : {}),
+        ...(options.days ? { days: options.days } : {}),
         // Свой ответ Tavily тоже умеет писать, но он нам не нужен: отвечает
         // бот своим голосом и своей моделью, а лишняя генерация — лишние
         // кредиты. Берём только страницы.
