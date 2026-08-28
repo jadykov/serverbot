@@ -1569,6 +1569,12 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
  * Глубина поиска здесь — advanced (2 кредита вместо 1): группа маленькая,
  * а норма поисков в день на человека и так ограничивает расход, так что
  * платить вдвое за заметно точнее подобранные страницы того стоит.
+ *
+ * Страниц берём 15 вместо умолчания в 5 (как у «!размышления», см.
+ * DEEP_SEARCH_RESULTS) — на число кредитов это не влияет, платится за сам
+ * вызов поиска, а не за объём выдачи, зато первому проходу («выжимка
+ * фактов») есть из чего реально выбирать. В чат по-прежнему уходит не
+ * больше 5 ссылок (см. sourceLink ниже) — это только про материал для модели.
  */
 async function searchWithTavily(ctx: BotContext, query: string): Promise<string | null> {
   const lookupProvider = findTextProvider(GEMINI_ID);
@@ -1576,7 +1582,7 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
     ? await maybeRewriteCityNewsQuery(lookupProvider, query)
     : { query, options: {} };
 
-  const pages = await searchTavily(resolved.query, { depth: 'advanced', ...resolved.options });
+  const pages = await searchTavily(resolved.query, { depth: 'advanced', maxResults: 15, ...resolved.options });
 
   if (pages.length === 0) {
     await ctx.reply(
