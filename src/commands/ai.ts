@@ -1605,15 +1605,14 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
  * Возвращает null, если ответить не вышло — ничего не нашлось или Gemini
  * не подключён; в обоих случаях сообщение об этом уже ушло пользователю.
  *
- * Глубина поиска здесь — advanced (2 кредита вместо 1): группа маленькая,
- * а норма поисков в день на человека и так ограничивает расход, так что
- * платить вдвое за заметно точнее подобранные страницы того стоит.
- *
- * Страниц берём 8 вместо умолчания в 5 (у «!размышления» своя, более щедрая
- * норма — см. DEEP_SEARCH_RESULTS) — на число кредитов это не влияет, платится
- * за сам вызов поиска, а не за объём выдачи, зато первому проходу («выжимка
- * фактов») есть из чего реально выбирать. В чат по-прежнему уходит не
- * больше 5 ссылок (см. sourceLink ниже) — это только про материал для модели.
+ * Глубина и число страниц — умолчания Tavily (basic, 1 кредит; 5 страниц):
+ * раньше здесь стояли advanced и 8 страниц ради более точной выдачи, но
+ * 31.08.2026 на боте это стабильно ловило таймаут первого прохода («выжимка
+ * фактов» разбирает страницы той же головой, что и «подумать», — см.
+ * NEWS_DIGEST_RULE) — 28КБ текста от 8 страниц не укладывались в 150с
+ * у gemini-3.5-flash, а таймаут цепочка не перебирает (см. RETRYABLE
+ * в chain.ts), так что запрос падал целиком. Меньше страниц — меньше веса
+ * на входе первого прохода и меньше риск не уложиться.
  */
 async function searchWithTavily(ctx: BotContext, query: string): Promise<string | null> {
   const lookupProvider = findTextProvider(GEMINI_ID);
@@ -1621,7 +1620,7 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
     ? await maybeRewriteCityNewsQuery(lookupProvider, query)
     : { query, options: {} };
 
-  const pages = await searchTavily(resolved.query, { depth: 'advanced', maxResults: 8, ...resolved.options });
+  const pages = await searchTavily(resolved.query, resolved.options);
 
   if (pages.length === 0) {
     await ctx.reply(
