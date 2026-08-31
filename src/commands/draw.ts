@@ -42,17 +42,18 @@ const CB = 'd';
 const GEMINI_ID = 'gemini';
 
 /**
- * Кто собирает промпт: Gemini на цепочке «Подумать» (GEMINI_CHAIN_THINK),
- * а не на лёгкой формальной цепочке (GEMINI_CHAIN_LIGHT — ею теперь заняты
- * !скажи и !трек, см. commands/ai.ts). Картинка стоит денег и нормирована —
- * промах на этапе бесплатного разговора обиднее, чем лишние секунды
- * на более умную модель здесь. Раньше стояла лёгкая цепочка (называлась
- * GEMINI_CHAIN_DRAW) — сменили ради меньшего числа испорченных попыток.
+ * Кто собирает промпт: Gemini на цепочке GEMINI_CHAIN_LIGHT — той же, что
+ * у !скажи и !трек (см. commands/ai.ts). Раньше на время переехала на
+ * THINK_CHAIN (картинка стоит денег и нормирована — промах на этапе
+ * бесплатного разговора обиднее лишних секунд), но у «light» теперь тоже
+ * полноценная голова-flash, а не lite (см. config.gemini.chains.light) —
+ * так что вернулись сюда: хуже не станет, а голова своя, отдельная от
+ * !контекст, и не ждёт одного и того же фолбэка с ним разом.
  */
 function planner(): { provider: TextProvider; models: string[] } | null {
   const provider = findTextProvider(GEMINI_ID);
   if (!provider?.isConfigured) return null;
-  return { provider, models: config.gemini.chains.think };
+  return { provider, models: config.gemini.chains.light };
 }
 
 /** Достаёт черновики раздела, попутно выбрасывая протухшие. */
