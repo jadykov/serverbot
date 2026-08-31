@@ -1442,7 +1442,11 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
         })
       : [];
 
-    const answer = await withChatAction(ctx, 'typing', () => thinkDeeply(question, pages));
+    // Реплай на сообщение (в т.ч. на ответ самого бота) подмешивается только
+    // сюда, в вопрос для модели — а не в query для Tavily выше: поиску нужны
+    // чистые ключевые слова, а не «Пользователь отвечает на твою реплику…».
+    const questionForModel = buildReplyQuotePrompt(ctx, question, ctx.message?.reply_to_message);
+    const answer = await withChatAction(ctx, 'typing', () => thinkDeeply(questionForModel, pages));
 
     await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
     await sendAnswer(ctx, answer.text, question);
@@ -1624,9 +1628,14 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
     ...(chain.models.includes('gemma-4-31b-it') ? ['gemma-4-31b-it'] : []),
   ];
 
+  // Реплай на сообщение (в т.ч. на ответ самого бота) подмешивается только
+  // в промпты модели ниже — не в resolved.query выше, тому нужны чистые
+  // ключевые слова для Tavily, а не цитата с обвязкой.
+  const topic = buildReplyQuotePrompt(ctx, resolved.query, ctx.message?.reply_to_message);
+
   // Первый проход: чистая фактическая выжимка по найденным страницам,
   // без своих рассуждений (см. NEWS_DIGEST_RULE).
-  const digest = await generateWithChain(gemini, models, buildSearchPrompt(resolved.query, pages), {
+  const digest = await generateWithChain(gemini, models, buildSearchPrompt(topic, pages), {
     // Свой потолок токенов, отдельно от THINK_CHAIN (см. config.ai.webMaxOutputTokens) —
     // на входе много веса (страницы Tavily), обрыв на середине ответа обиднее лишнего запаса.
     maxOutputTokens: config.ai.webMaxOutputTokens,
@@ -1643,7 +1652,7 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
 
   // Второй проход: финальный ответ по выжимке, дополненный пониманием —
   // в этом смысл живого поиска (см. newsFinalRule).
-  const answer = await generateWithChain(gemini, models, buildNewsFinalPrompt(resolved.query, digest.text), {
+  const answer = await generateWithChain(gemini, models, buildNewsFinalPrompt(topic, digest.text), {
     maxOutputTokens: config.ai.webMaxOutputTokens,
     extraInstruction: newsFinalRule(Math.max(charBudget, 0)),
     timeoutMs: config.ai.webTimeoutMs,
