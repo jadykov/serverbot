@@ -1449,7 +1449,9 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
     const answer = await withChatAction(ctx, 'typing', () => thinkDeeply(questionForModel, pages));
 
     await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
-    await sendAnswer(ctx, answer.text, question);
+    // Всегда файлом, а не по длине (см. sendAnswer): в этом и смысл команды —
+    // развёрнутый разбор, а не сообщение, обрезанное под лимит Telegram.
+    await sendAnswerAsFile(ctx, answer.text, 'md', question);
 
     const price = typeof answer.costUsd === 'number' ? `$${answer.costUsd.toFixed(3)}` : 'платно';
     // Объём мыслей показываем рядом с потолком, и это не любопытство:
