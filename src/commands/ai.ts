@@ -276,6 +276,22 @@ const LIMITS_PREFIX = switchWord('лимиты');
 const TEST_PREFIX = switchWord('тест');
 
 /**
+ * «!flash3.5», «!flash 3.6», «!flash3.7» — прогон ровно одной модели
+ * Gemini напрямую, в обход THINK_CHAIN/MAIN_CHAIN и её порядка фолбэков.
+ *
+ * Цепочка прячет, какая именно модель отказала и какая ответила: пока
+ * в !сети/!контексте всё работает, неважно, кто из трёх Flash сегодня жив.
+ * Но когда хочется проверить конкретно — «а 3.7 сейчас вообще отвечает?» —
+ * цепочка для этого не годится: она либо молча подставит соседку, либо,
+ * если модель не ретраебл (см. RETRYABLE в chain.ts), сразу откажет самой
+ * первой попавшейся. Пробел после «flash» необязателен — «flash3.7» и
+ * «flash 3.7» распознаются одинаково.
+ */
+const FLASH_35_PREFIX = switchWord('flash\\s*3\\.5');
+const FLASH_36_PREFIX = switchWord('flash\\s*3\\.6');
+const FLASH_37_PREFIX = switchWord('flash\\s*3\\.7');
+
+/**
  * Та же команда, но в подписи к фотографии: «гем что здесь написано».
  * Латинская и кириллическая формы вместе, слеш необязателен — в подписи
  * Telegram не размечает команды, так что разбираем обе одинаково, обычным
@@ -760,6 +776,23 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   const test = TEST_PREFIX.exec(trimmed);
   if (test) {
     await handleTest(ctx, (test[1] ?? '').trim());
+    return;
+  }
+
+  // «!flash3.5/3.6/3.7» — той же природы, что «!тест»: проверка, а не разговор.
+  const flash35 = FLASH_35_PREFIX.exec(trimmed);
+  if (flash35) {
+    await handleFlashTest(ctx, 'gemini-3.5-flash', 'flash3.5', (flash35[1] ?? '').trim());
+    return;
+  }
+  const flash36 = FLASH_36_PREFIX.exec(trimmed);
+  if (flash36) {
+    await handleFlashTest(ctx, 'gemini-3.6-flash', 'flash3.6', (flash36[1] ?? '').trim());
+    return;
+  }
+  const flash37 = FLASH_37_PREFIX.exec(trimmed);
+  if (flash37) {
+    await handleFlashTest(ctx, 'gemini-3.7-flash', 'flash3.7', (flash37[1] ?? '').trim());
     return;
   }
 
@@ -1576,9 +1609,9 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
  * а норма поисков в день на человека и так ограничивает расход, так что
  * платить вдвое за заметно точнее подобранные страницы того стоит.
  *
- * Страниц берём 10 вместо умолчания в 5 (как у «!размышления», см.
- * DEEP_SEARCH_RESULTS) — на число кредитов это не влияет, платится за сам
- * вызов поиска, а не за объём выдачи, зато первому проходу («выжимка
+ * Страниц берём 8 вместо умолчания в 5 (у «!размышления» своя, более щедрая
+ * норма — см. DEEP_SEARCH_RESULTS) — на число кредитов это не влияет, платится
+ * за сам вызов поиска, а не за объём выдачи, зато первому проходу («выжимка
  * фактов») есть из чего реально выбирать. В чат по-прежнему уходит не
  * больше 5 ссылок (см. sourceLink ниже) — это только про материал для модели.
  */
@@ -1588,7 +1621,7 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
     ? await maybeRewriteCityNewsQuery(lookupProvider, query)
     : { query, options: {} };
 
-  const pages = await searchTavily(resolved.query, { depth: 'advanced', maxResults: 10, ...resolved.options });
+  const pages = await searchTavily(resolved.query, { depth: 'advanced', maxResults: 8, ...resolved.options });
 
   if (pages.length === 0) {
     await ctx.reply(
@@ -1821,6 +1854,37 @@ async function handleTest(ctx: BotContext, question: string): Promise<void> {
     // Без второй сноски-приписки: это команда для проверки, не для чтения,
     // и время/провайдер и так видны в логах (logger.debug в openai-compatible.ts).
     await sendAnswer(ctx, answer, question);
+  } catch (error) {
+    await replyWithError(ctx, error);
+  }
+}
+
+/**
+ * «/гем !flash3.5/3.6/3.7 ...» — прогон ровно одной названной модели Gemini,
+ * в обход THINK_CHAIN/MAIN_CHAIN (см. FLASH_35_PREFIX/FLASH_36_PREFIX/
+ * FLASH_37_PREFIX выше). generateWithChain принимает models с одним
+ * элементом без спецкейса: успех вернёт ответ, отказ пробросит ошибку
+ * без перебора (в чейне попросту некого перебирать, см. RETRYABLE в chain.ts).
+ */
+async function handleFlashTest(ctx: BotContext, model: string, command: string, question: string): Promise<void> {
+  if (!question) {
+    await ctx.reply(
+      `Прогон модели <code>${model}</code> напрямую, в обход цепочки с фолбэками — ` +
+        'проверка, отвечает ли она прямо сейчас.\n\n' +
+        `<code>/гем !${command} сколько будет 2+2</code>`,
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
+  const gemini = await requireGemini(ctx);
+  if (!gemini) return;
+
+  try {
+    const answer = await withChatAction(ctx, 'typing', () =>
+      generateWithChain(gemini, [model], question, { maxOutputTokens: config.test.maxOutputTokens }),
+    );
+    await sendAnswer(ctx, answer.text, question);
   } catch (error) {
     await replyWithError(ctx, error);
   }
