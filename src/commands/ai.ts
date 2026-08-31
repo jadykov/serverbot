@@ -1627,9 +1627,9 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
   // Первый проход: чистая фактическая выжимка по найденным страницам,
   // без своих рассуждений (см. NEWS_DIGEST_RULE).
   const digest = await generateWithChain(gemini, models, buildSearchPrompt(resolved.query, pages), {
-    // Потолок у THINK_CHAIN и так щедрее обычного (см. GEMINI_MAX_OUTPUT_THINK) —
-    // хватает и на рассуждение, и на разбор найденных страниц.
-    maxOutputTokens: chain.maxOutputTokens,
+    // Свой потолок токенов, отдельно от THINK_CHAIN (см. config.ai.webMaxOutputTokens) —
+    // на входе много веса (страницы Tavily), обрыв на середине ответа обиднее лишнего запаса.
+    maxOutputTokens: config.ai.webMaxOutputTokens,
     extraInstruction: NEWS_DIGEST_RULE,
     // Свой, более щедрый таймаут: см. config.ai.webTimeoutMs — запрос сюда
     // тяжелее обычного, общих 90 секунд голове цепочки не всегда хватает.
@@ -1644,7 +1644,7 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
   // Второй проход: финальный ответ по выжимке, дополненный пониманием —
   // в этом смысл живого поиска (см. newsFinalRule).
   const answer = await generateWithChain(gemini, models, buildNewsFinalPrompt(resolved.query, digest.text), {
-    maxOutputTokens: chain.maxOutputTokens,
+    maxOutputTokens: config.ai.webMaxOutputTokens,
     extraInstruction: newsFinalRule(Math.max(charBudget, 0)),
     timeoutMs: config.ai.webTimeoutMs,
   });
