@@ -139,7 +139,7 @@ const HELP_TEXT = [
   '/whoami — ваши id пользователя и чата',
   '/status — аптайм, память, режим работы',
   '<code>гем !лимиты</code> — сколько осталось от дневных норм',
-  '<code>гем !flash3.5</code>, <code>!flash3.6</code>, <code>!flash3.7</code>',
+  '<code>гем !flash3.5/3.6/3.7</code>',
   '/help — эта справка</blockquote>',
 ].join('\n');
 
