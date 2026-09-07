@@ -31,7 +31,7 @@ export const BOT_COMMANDS = [
   { command: 'stop', description: 'Замолчать в этом разделе (обратно — /start)' },
   // Кириллическую /гем в это меню добавить нельзя: Telegram принимает
   // в именах команд только латиницу (иначе BOT_COMMAND_INVALID).
-  { command: 'gem', description: 'Запрос к Gemini (то же, что /гем). Слова: !нарисуй !скажи !найди !файл' },
+  { command: 'gem', description: 'То же, что /гем. Слова: !контекст !сеть !нарисуй !скажи !трек !найди !файл' },
   { command: 'ping', description: 'Проверить связь и задержку' },
   { command: 'marco', description: 'Тест: бот ответит Polo!' },
   { command: 'test', description: 'Самодиагностика бота' },

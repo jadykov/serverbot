@@ -17,3 +17,8 @@ data/
 .vscode/
 coverage/
 tmp/
+
+# Локальные рабочие заметки — в git не попадают никогда
+.structure-project.md
+.chain-think.md
+.status.md

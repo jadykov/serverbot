@@ -8,16 +8,15 @@
  *
  * Что умеет /гем, задаётся первым словом запроса, и слово это пишется
  * с восклицательным знаком:
- *   /гем <вопрос>             — обычный ответ цепочкой, выбранной для раздела;
- *   /гем !контекст <задача>   — сильная цепочка;
+ *   /гем <вопрос>             — обычный ответ умной цепочкой;
+ *   /гем !контекст <задача>   — она же, но разбор подробный, потолок выше;
  *   /гем !контекст md|txt|html <задача> — она же, но ответ приходит файлом;
  *   /гем !нарисуй <описание>  — картинка вместо текста;
  *   /гем !скажи <текст>       — ответ голосом;
  *   /гем !трек <описание>     — песня с вокалом (платно);
  *   /гем !найди <что искать>  — поиск по переписке раздела;
  *   /гем !сеть <вопрос>       — ответ со свежими данными из интернета;
- *   /гем !файл <что сделать>  — ответ отдельным файлом;
- *   /гем !где здесь <предмет> — рамка поверх фотографии;
+ *   /гем !файл <формат> <что сделать> — ответ отдельным файлом;
  *   /гем !расшифруй (реплаем) — послушать голосовое и выписать сказанное дословно;
  *   /гем !расшифруй с ответом — то же голосовое, но ответить по существу, без выписки;
  *   /гем !личка (реплаем)    — переслать сообщение в личный диалог.
@@ -60,7 +59,6 @@ import { rememberMessage, searchMessages } from '../services/search-index.js';
 import { getDigest, noteMessage as noteDigestMessage } from '../services/digest.js';
 import { authorName } from '../middlewares/searchIndex.js';
 import { HELP_TEXT_PLAIN } from './basic.js';
-import { BOX_COLORS, drawBoxes, findObjects } from '../services/pointing.js';
 import { prepareDocument } from '../services/documents.js';
 import { prepareVoice } from '../services/voice.js';
 import { findUser, knownUsers } from '../services/user-directory.js';
@@ -119,13 +117,13 @@ function switchWord(words: string): RegExp {
 const CONTEXT_PREFIX = switchWord('контекст');
 
 /**
- * Второе слово-переключатель, по тому же принципу: «/гем !нарисуй ...» —
+ * Слово-переключатель: «/гем !нарисуй ...» —
  * вместо ответа текстом бот рисует картинку.
  */
 const DRAW_PREFIX = switchWord('нарисуй');
 
 /**
- * Третье слово-переключатель: «/гем !скажи ...» — ответ голосом.
+ * Слово-переключатель: «/гем !скажи ...» — ответ голосом.
  *
  * Без текста после слова озвучивается последняя реплика бота: чаще всего
  * это и нужно — прочитал ответ, захотел послушать.
@@ -133,7 +131,7 @@ const DRAW_PREFIX = switchWord('нарисуй');
 const SPEAK_PREFIX = switchWord('скажи');
 
 /**
- * Восьмое слово-переключатель: «/гем !трек ...» — песня с вокалом.
+ * Слово-переключатель: «/гем !трек ...» — песня с вокалом.
  *
  * Второе и последнее место, где бот тратит деньги. Минута музыки у Ace-Step
  * стоит около $0,03 — вдвое дороже картинки, — поэтому норма своя и своя же
@@ -146,13 +144,14 @@ const SPEAK_PREFIX = switchWord('скажи');
 const TRACK_PREFIX = switchWord('трек|песня');
 
 /**
- * Пятое слово-переключатель: «/гем !файл ...» — ответ отдельным файлом.
- * Реплаем и без запроса выгружает в файл то сообщение, на которое ответили.
+ * Слово-переключатель: «/гем !файл ...» — ответ отдельным файлом.
+ * Реплай ничего не выгружает: «!файл» всегда идёт к модели
+ * (формат + что сделать), выгрузка сообщений реплаем убрана как неактуальная.
  */
 const FILE_PREFIX = switchWord('файл');
 
 /**
- * Шестое слово-переключатель: «/гем !личка» реплаем — переслать сообщение
+ * Слово-переключатель: «/гем !личка» реплаем — переслать сообщение
  * в личный диалог с ботом.
  *
  * Зачем: длинный файл или разбор удобнее забрать к себе, а не листать
@@ -167,31 +166,33 @@ const FILE_PREFIX = switchWord('файл');
 const DM_PREFIX = switchWord('личка|лс');
 
 /**
- * Четвёртое слово-переключатель: «/гем !найди ...» — поиск по переписке
+ * Слово-переключатель: «/гем !найди ...» — поиск по переписке
  * раздела. Ищет по смыслу, а не по буквам (см. src/services/search-index.ts).
  */
 const SEARCH_PREFIX = switchWord('найди|найти');
 
 /**
- * Девятое слово-переключатель: «/гем !сеть ...» — ответ со свежими данными
+ * Слово-переключатель: «/гем !сеть ...» — ответ со свежими данными
  * из интернета.
  *
  * Соседствует с «!найди» не случайно, и путать их не надо: «!найди» ищет
  * по переписке раздела, «!сеть» — по интернету. Отсюда и слово: «поиск»
  * годилось бы обоим, а «сеть» ни с чем не спутаешь.
  *
- * Поиск включается словом, а не идёт по каждому вопросу, потому что стоит
- * денег: обычный ответ пишет бесплатный Gemini, а каждый поиск — это
- * платный вызов к OpenRouter. Отсюда и дневная норма (см. handleWeb ниже),
- * и то, что «привет» не уходит искать в интернет.
+ * Поиск включается словом, а не идёт по каждому вопросу, и вот почему.
+ * Сам поиск через Tavily идёт за бесплатные кредиты пакета (в бесплатном
+ * их 1000, по одному за обычный поиск — см. src/services/tavily.ts),
+ * а платная — модель, которая пишет ответ по найденным страницам
+ * (OpenRouter-голова умной цепочки). Отсюда и дневная норма (см. handleWeb
+ * ниже), и то, что «привет» не уходит искать в интернет.
  *
  * «Гугл» принят вторым написанием: слово в такой просьбе приходит в голову
- * первым, даже когда ищет за нас Gemini.
+ * первым, даже когда ищет за нас Tavily.
  */
 const WEB_PREFIX = switchWord('сеть|интернет|гугл|погугли');
 
 /**
- * Десятое слово-переключатель: «/гем !размышление ...» — один вопрос, много
+ * Слово-переключатель: «/гем !размышление ...» — один вопрос, много
  * думанья.
  *
  * Не путать с «!контекстом», хотя оба про «подумай получше». «!контекст» —
@@ -213,7 +214,7 @@ const WEB_PREFIX = switchWord('сеть|интернет|гугл|погугли
 const DEEP_PREFIX = switchWord('размышление');
 
 /**
- * Седьмое слово-переключатель: «/гем !расшифруй» реплаем на голосовое.
+ * Слово-переключатель: «/гем !расшифруй» реплаем на голосовое.
  *
  * Слово нужно ровно потому, что голосовому нельзя написать подпись: у снимка
  * и файла есть caption, которым в группе и обращаются к боту, а у голосового
@@ -255,43 +256,6 @@ const RESET_PREFIX = switchWord('resetuser');
 const LIMITS_PREFIX = switchWord('лимиты');
 
 /**
- * Служебное слово-переключатель: «/гем !тест ...» — прогон через
- * OpenAI-совместимый провайдер (services/openai-compatible.ts) в обход всего:
- * без цепочки Gemini, без истории раздела, без архива поиска и долгой памяти.
- *
- * Заведено ровно под один сценарий — проверить, что сторонний OpenAI-совместимый
- * эндпоинт (свой сервер, локальная модель через ngrok и т.п.) вообще отвечает,
- * не трогая при этом ничего, чем живёт обычный разговор. Провайдер именно
- * openai, а не «какой найдётся»: resolveTextProvider тихо откатился бы
- * на Gemini, если OPENAI_API_KEY не задан, а тут нужна проверка ровно того,
- * что настроено под OPENAI_*, — молча подменять его нельзя.
- *
- * Потолок ответа свой и щедрый (см. config.test.maxOutputTokens) — рассуждающие
- * модели вроде DeepSeek-R1 тратят токены на размышление до самого ответа,
- * и на обычном потолке чата рискуют вернуть пустой content, не дойдя до него.
- *
- * В /help намеренно нет: это не возможность группы, а инструмент того, кто
- * поднял свой сервер и хочет его проверить.
- */
-const TEST_PREFIX = switchWord('тест');
-
-/**
- * «!flash3.5», «!flash 3.6», «!flash3.7» — прогон ровно одной модели
- * Gemini напрямую, в обход THINK_CHAIN/MAIN_CHAIN и её порядка фолбэков.
- *
- * Цепочка прячет, какая именно модель отказала и какая ответила: пока
- * в !сети/!контексте всё работает, неважно, кто из трёх Flash сегодня жив.
- * Но когда хочется проверить конкретно — «а 3.7 сейчас вообще отвечает?» —
- * цепочка для этого не годится: она либо молча подставит соседку, либо,
- * если модель не ретраебл (см. RETRYABLE в chain.ts), сразу откажет самой
- * первой попавшейся. Пробел после «flash» необязателен — «flash3.7» и
- * «flash 3.7» распознаются одинаково.
- */
-const FLASH_35_PREFIX = switchWord('flash\\s*3\\.5');
-const FLASH_36_PREFIX = switchWord('flash\\s*3\\.6');
-const FLASH_37_PREFIX = switchWord('flash\\s*3\\.7');
-
-/**
  * Та же команда, но в подписи к фотографии: «гем что здесь написано».
  * Латинская и кириллическая формы вместе, слеш необязателен — в подписи
  * Telegram не размечает команды, так что разбираем обе одинаково, обычным
@@ -304,32 +268,7 @@ const MEDIA_COMMAND = /^\/?(?:гем|gem)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$
  * а чтобы подсказать: человек, привыкший к прежнему синтаксису, иначе решит,
  * что рисование сломалось. Ответ на вопрос он при этом всё равно получит.
  */
-const FORGOTTEN_BANG = /^(?:нарисуй|контекст|скажи|найди|найти|расшифруй|трек|песня|сеть|погугли|размышление)(?:[\s,:.—–-]|$)/i;
-
-/**
- * Слова-переключатели ещё и отдельными командами: «/нарисуй кота» вместо
- * «/гем !нарисуй кота». Ни справку, ни сами слова-переключатели это не меняет —
- * это просто ещё один вход в тот же handleGemini с тем же текстом, который
- * получился бы после «/гем»: восклицательный знак здесь не нужен ровно
- * по той же причине, по которой не нужен он и самому «/гем», — слово стоит
- * после «/», спутать его с обычной репликой уже нельзя.
- *
- * canonical — какое из слов группы подставить в реконструированный текст;
- * какое именно взяли, не важно, switchWord() в handleGemini понимает
- * все альтернативы группы одинаково.
- */
-const ALIAS_COMMANDS: ReadonlyArray<{ words: string; canonical: string }> = [
-  { words: 'контекст', canonical: 'контекст' },
-  { words: 'нарисуй', canonical: 'нарисуй' },
-  { words: 'скажи', canonical: 'скажи' },
-  { words: 'трек|песня', canonical: 'трек' },
-  { words: 'файл', canonical: 'файл' },
-  { words: 'расшифруй|послушай', canonical: 'расшифруй' },
-  { words: 'личка|лс', canonical: 'личка' },
-  { words: 'найди|найти', canonical: 'найди' },
-  { words: 'сеть|интернет|гугл|погугли', canonical: 'сеть' },
-  { words: 'размышление', canonical: 'размышление' },
-];
+const FORGOTTEN_BANG = /^(?:нарисуй|контекст|скажи|найди|найти|расшифруй|послушай|трек|песня|сеть|интернет|гугл|погугли|размышление|файл|личка|лс|лимиты)(?:[\s,:.—–-]|$)/i;
 
 /**
  * Вопрос о самом боте: «что ты умеешь», «как тобой пользоваться» и подобное.
@@ -438,8 +377,8 @@ const TO_TEXT = /^(?:в\s*текст|текстом|дословно|расши�
 /**
  * «!расшифруй с ответом» / «ответом» / «ответь» / «отвечай» — просят
  * содержательный ответ по записи вместо дословной выписки, которая
- * с 21.08.2026 стала умолчанием у голого «!расшифруй» (см. ALIAS_COMMANDS
- * и ветку реплая на голосовое ниже).
+ * с 21.08.2026 стала умолчанием у голого «!расшифруй» (см. ветку реплая
+ * на голосовое ниже).
  */
 const WITH_ANSWER = /^(?:с\s*ответом|ответом|ответь|отвечай)$/i;
 
@@ -739,10 +678,10 @@ function extractPrompt(ctx: BotContext, args: string): string {
 /**
  * Обработчик /гем и /gem.
  *
- * По умолчанию работает цепочкой, выбранной для раздела командой /режим.
- * Если запрос начинается со слова «контекст» (или «context»), вместо неё берётся
- * сильная цепочка — какой бы режим в разделе ни стоял. Дневная норма у этих
- * моделей небольшая, поэтому переключение всегда явное.
+ * По умолчанию отвечает умная цепочка; если запрос начинается со слова
+ * «!контекст», берётся она же, но с высоким потолком ответа и наказом
+ * разворачиваться (см. THINK_RULE выше). Дневная норма у платных голов
+ * небольшая, поэтому переключение всегда явное.
  */
 async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   const trimmed = rawPrompt.trim();
@@ -753,7 +692,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
    * приходится отдельно.
    *
    * Ветка забирает и пустой запрос («/гем» реплаем на фото — «что тут?»),
-   * и «!где» с рамками, и любой вопрос про снимок. А вот «!нарисуй», «!скажи»,
+   * и любой вопрос про снимок. А вот «!нарисуй», «!скажи»,
    * «!найди» и «!контекст» пропускает дальше: они про своё, и то, что рядом
    * оказалась фотография, ничего в них не меняет.
    */
@@ -768,31 +707,6 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   // «!лимиты» — тоже служебная и тоже без аргументов, реплай ей не нужен.
   if (LIMITS_PREFIX.test(trimmed)) {
     await handleLimits(ctx);
-    return;
-  }
-
-  // «!тест» — тоже сразу: она про проверку стороннего провайдера, а не про
-  // разговор, и ни с чем из того, что дальше (реплаи на фото/голос/файл), не пересекается.
-  const test = TEST_PREFIX.exec(trimmed);
-  if (test) {
-    await handleTest(ctx, (test[1] ?? '').trim());
-    return;
-  }
-
-  // «!flash3.5/3.6/3.7» — той же природы, что «!тест»: проверка, а не разговор.
-  const flash35 = FLASH_35_PREFIX.exec(trimmed);
-  if (flash35) {
-    await handleFlashTest(ctx, 'gemini-3.5-flash', 'flash3.5', (flash35[1] ?? '').trim());
-    return;
-  }
-  const flash36 = FLASH_36_PREFIX.exec(trimmed);
-  if (flash36) {
-    await handleFlashTest(ctx, 'gemini-3.6-flash', 'flash3.6', (flash36[1] ?? '').trim());
-    return;
-  }
-  const flash37 = FLASH_37_PREFIX.exec(trimmed);
-  if (flash37) {
-    await handleFlashTest(ctx, 'gemini-3.7-flash', 'flash3.7', (flash37[1] ?? '').trim());
     return;
   }
 
@@ -842,6 +756,18 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   }
 
   const repliedDocument = ctx.message?.reply_to_message?.document;
+  // «!сеть» реплаем на документ не ищет: поиск идёт по интернету, а не по
+  // файлу, и молча разбирать документ вместо поиска — значит врать человеку
+  // в лицо (он ждёт свежие данные, а получает «в файле ничего нет»).
+  // Поэтому сразу объясняем, а не делаем вид, что поискали.
+  if (repliedDocument && WEB_PREFIX.test(trimmed)) {
+    await ctx.reply(
+      '«!сеть» реплаем на файл не работает: она ищет по интернету, а не по документу.\n\n' +
+        'Спросите отдельным сообщением: <code>/гем !сеть ваш вопрос</code>.',
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
   if (repliedDocument && !FILE_PREFIX.test(trimmed) && !DEEP_PREFIX.test(trimmed)) {
     await handleDocument(ctx, repliedDocument.file_id, repliedDocument.file_name ?? 'файл', `/гем ${rawPrompt}`);
     return;
@@ -891,16 +817,6 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
         'выпишу дословно. Нужен ответ по смыслу — <code>/гем !расшифруй с ответом</code>.\n\n' +
         'В личке команда и вовсе не нужна — пришлите голосовое, и я отвечу.',
       { parse_mode: 'HTML' },
-    );
-    return;
-  }
-
-  // «!где» без снимка объяснить нечем: показывать не на чем. Молча отвечать
-  // текстом было бы хуже всего — человек решит, что рамки сломались.
-  if (!repliedPhoto && WHERE_PREFIX.test(trimmed)) {
-    await ctx.reply(
-      '«!где» работает по фотографии: пришлите её с такой подписью ' +
-        'либо ответьте этой командой на уже отправленный снимок.',
     );
     return;
   }
@@ -1820,76 +1736,6 @@ async function handleLimits(ctx: BotContext): Promise<void> {
 }
 
 /**
- * «/гем !тест ...» — прогон через OpenAI-совместимый провайдер в обход всего
- * остального (см. TEST_PREFIX выше). Никакого перебора моделей: провайдер
- * ровно один, и если он не ответил — значит не ответил, это и есть проверка.
- */
-async function handleTest(ctx: BotContext, question: string): Promise<void> {
-  if (!question) {
-    await ctx.reply(
-      'Прогон через OpenAI-совместимый провайдер (OPENAI_BASE_URL), в обход цепочки Gemini, ' +
-        'истории и памяти — только сам вопрос и сразу ответ.\n\n' +
-        '<code>/гем !тест сколько будет 2+2</code>',
-      { parse_mode: 'HTML' },
-    );
-    return;
-  }
-
-  const provider = findTextProvider('openai');
-  if (!provider) {
-    await ctx.reply('⚠️ OpenAI-совместимый провайдер не зарегистрирован в боте.');
-    return;
-  }
-  if (!provider.isConfigured) {
-    await ctx.reply(`🔌 Он не настроен.\n\n• ${provider.setupHint}`);
-    return;
-  }
-
-  try {
-    const answer = await withChatAction(ctx, 'typing', () =>
-      provider.generateText(question, { maxOutputTokens: config.test.maxOutputTokens }),
-    );
-
-    // Без второй сноски-приписки: это команда для проверки, не для чтения,
-    // и время/провайдер и так видны в логах (logger.debug в openai-compatible.ts).
-    await sendAnswer(ctx, answer, question);
-  } catch (error) {
-    await replyWithError(ctx, error);
-  }
-}
-
-/**
- * «/гем !flash3.5/3.6/3.7 ...» — прогон ровно одной названной модели Gemini,
- * в обход THINK_CHAIN/MAIN_CHAIN (см. FLASH_35_PREFIX/FLASH_36_PREFIX/
- * FLASH_37_PREFIX выше). generateWithChain принимает models с одним
- * элементом без спецкейса: успех вернёт ответ, отказ пробросит ошибку
- * без перебора (в чейне попросту некого перебирать, см. RETRYABLE в chain.ts).
- */
-async function handleFlashTest(ctx: BotContext, model: string, command: string, question: string): Promise<void> {
-  if (!question) {
-    await ctx.reply(
-      `Прогон модели <code>${model}</code> напрямую, в обход цепочки с фолбэками — ` +
-        'проверка, отвечает ли она прямо сейчас.\n\n' +
-        `<code>/гем !${command} сколько будет 2+2</code>`,
-      { parse_mode: 'HTML' },
-    );
-    return;
-  }
-
-  const gemini = await requireGemini(ctx);
-  if (!gemini) return;
-
-  try {
-    const answer = await withChatAction(ctx, 'typing', () =>
-      generateWithChain(gemini, [model], question, { maxOutputTokens: config.test.maxOutputTokens }),
-    );
-    await sendAnswer(ctx, answer.text, question);
-  } catch (error) {
-    await replyWithError(ctx, error);
-  }
-}
-
-/**
  * «/гем !личка» реплаем — копия сообщения уезжает в личный диалог с ботом.
  *
  * Копируем, а не пересылаем: forward тащит за собой шапку «переслано из…»
@@ -2257,8 +2103,7 @@ function resolveImageRequest(
 }
 
 /**
- * Команда реплаем на чужую (или свою) фотографию: «/гем !где здесь клапан»,
- * «/гем что тут написано».
+ * Команда реплаем на чужую (или свою) фотографию: «/гем что тут написано».
  *
  * Отдельная ветка нужна из-за того, как устроен Telegram: в таком сообщении
  * самой картинки нет, есть только ссылка на неё в reply_to_message. Обработчик
@@ -2275,12 +2120,6 @@ async function handleRepliedPhoto(ctx: BotContext, fileId: string, rawPrompt: st
 
   try {
     const image = await withChatAction(ctx, 'typing', () => downloadAttachment(ctx, fileId));
-
-    const where = WHERE_PREFIX.exec(rawPrompt.trim());
-    if (where && image.mimeType === 'image/jpeg') {
-      await handlePointing(ctx, image, (where[1] ?? '').trim());
-      return;
-    }
 
     const prompt = rawPrompt.trim() || DEFAULT_IMAGE_PROMPT;
     await askChain(ctx, gemini, resolveChain(MAIN_CHAIN), prompt, { attachments: [image] });
@@ -2336,41 +2175,6 @@ async function handleReplyToBot(ctx: BotContext, text: string, repliedMessage: Q
   const prompt = buildReplyQuotePrompt(ctx, text, repliedMessage, 'ответ');
 
   await askChain(ctx, gemini, resolveChain(MAIN_CHAIN), prompt, { historyText: text });
-}
-
-/**
- * Подпись к фотографии вида «/гем !где здесь клапан» — просьба показать,
- * а не рассказать. Уводит снимок в отдельную ветку с рамками.
- */
-const WHERE_PREFIX = switchWord('где(?:\\s+(?:здесь|тут|на\\s+фото|на\\s+картинке))?');
-
-/**
- * «Где здесь ...»: находит предметы на фотографии и обводит их рамками.
- *
- * Отдельно от обычного разбора картинки, потому что задача другая. Обычная
- * модель расскажет, что на снимке; эта — покажет, где именно, вернув
- * координаты (см. src/services/pointing.ts).
- */
-async function handlePointing(ctx: BotContext, image: Attachment, query: string): Promise<void> {
-  try {
-    const found = await withChatAction(ctx, 'upload_photo', () => findObjects(image, query));
-
-    if (found.length === 0) {
-      await ctx.reply(`🔍 Не нашёл на фотографии: ${escapeHtml(query)}`, { parse_mode: 'HTML' });
-      return;
-    }
-
-    const marked = drawBoxes(image.data, found);
-    const legend = found
-      .map((object, index) => `${BOX_COLORS[index % BOX_COLORS.length]!.name} — ${object.label}`)
-      .join('\n');
-
-    await ctx.replyWithPhoto(new InputFile(marked, 'found.jpg'), {
-      caption: `🔍 ${query}\n\n${legend}`,
-    });
-  } catch (error) {
-    await replyWithError(ctx, error);
-  }
 }
 
 /**
@@ -2508,15 +2312,6 @@ async function handlePhotos(ctx: BotContext, fileIds: string[], caption: string)
       Promise.all(fileIds.map((fileId) => downloadAttachment(ctx, fileId))),
     );
 
-    // «где здесь ...» — просьба показать, а не рассказать. Рамки рисуются
-    // по первому снимку: обводить каждый кадр альбома человек не просил.
-    const where = WHERE_PREFIX.exec(request.prompt.trim());
-    const first = attachments[0];
-    if (where && first && first.mimeType === 'image/jpeg') {
-      await handlePointing(ctx, first, (where[1] ?? '').trim());
-      return;
-    }
-
     await askChain(ctx, gemini, resolveChain(MAIN_CHAIN), request.prompt, { attachments });
   } catch (error) {
     await replyWithError(ctx, error);
@@ -2527,8 +2322,8 @@ export function registerAiCommands(bot: Bot<BotContext>): void {
   // ------------------------------------------------------- /gem и /гем
   bot.command('gem', async (ctx, next) => {
     // Команда в подписи к фотографии — не наше дело: снимок разбирает
-    // обработчик ниже, он умеет и рамки, и склейку альбомов. Пропускаем
-    // ход, иначе подпись «/гем !где каша» отвечала бы текстом.
+    // обработчик ниже, он умеет и склейку альбомов. Пропускаем
+    // ход, иначе подпись с вопросом отвечала бы текстом без картинки.
     if (ctx.message?.photo) return next();
 
     // То же и с подписью к голосовому. Написать её позволяет не всякий клиент,
@@ -2554,28 +2349,6 @@ export function registerAiCommands(bot: Bot<BotContext>): void {
 
     await handleGemini(ctx, extractPrompt(ctx, match?.[2] ?? ''));
   });
-
-  // ---------------------------------------------- алиасы слов-переключателей
-  // «/нарисуй кота» и подобные — см. ALIAS_COMMANDS выше.
-  for (const { words, canonical } of ALIAS_COMMANDS) {
-    const pattern = new RegExp(`^\\/(?:${words})(?:@([A-Za-z0-9_]+))?(?:\\s+([\\s\\S]*))?$`, 'i');
-
-    bot.hears(pattern, async (ctx, next) => {
-      const match = typeof ctx.match === 'string' ? null : ctx.match;
-      const addressee = match?.[1];
-
-      // В группе может быть несколько ботов: «/нарисуй@другой_бот» — не наше дело.
-      if (addressee && addressee.toLowerCase() !== ctx.me.username.toLowerCase()) return;
-
-      // Та же логика, что и у «/гем»: подпись к фото/голосовому разбирает
-      // соответствующий обработчик, а не эта ветка.
-      if (ctx.message?.photo) return next();
-      if (ctx.message?.voice) return next();
-
-      const rest = match?.[2]?.trim();
-      await handleGemini(ctx, rest ? `!${canonical} ${rest}` : `!${canonical}`);
-    });
-  }
 
   // ------------------------------------------------------------ картинки
   // Альбом Telegram присылает несколькими апдейтами с общим media_group_id:
