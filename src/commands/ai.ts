@@ -43,7 +43,7 @@
  *     в группах — только если у бота отключён privacy mode
  *     (@BotFather → /setprivacy → Disable).
  */
-import { GrammyError, InputFile, type Bot } from 'grammy';
+import { GrammyError, InlineKeyboard, InputFile, type Bot } from 'grammy';
 import { config, isAdmin } from '../config.js';
 import { logger } from '../logger.js';
 import { findTextProvider, generateWithFallback, resolveFastLevels, resolveSmartLevels, resolveWebLevels } from '../services/registry.js';
@@ -82,6 +82,31 @@ import {
 
 /** id провайдера Gemini в реестре. */
 const GEMINI_ID = 'gemini';
+
+/**
+ * Незавершённый заказ трека: план показан, деньги ещё не потрачены.
+ * Живёт в сессии раздела, по одному на человека — как черновики рисования
+ * (см. DrawDraft в types.ts и src/commands/draw.ts).
+ */
+interface TrackDraft {
+  title: string;
+  stylePrompt: string;
+  negativeStylePrompt?: string;
+  lyrics: string;
+  duration: number;
+  instrumental: boolean;
+  updatedAt: number;
+}
+
+declare module '../types.js' {
+  interface SessionData {
+    /** Незавершённые заказы треков, по одному на пользователя (ключ — его id). */
+    trackDrafts?: Record<string, TrackDraft>;
+  }
+}
+
+/** Префикс callback_data кнопок трека. Коротко: у Telegram лимит 64 байта. */
+const TRACK_CB = 't';
 
 /**
  * Кириллическая форма команды: гем, /гем, /гем@имя_бота.
@@ -1228,10 +1253,10 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
     const answer = await withChatAction(ctx, 'typing', () => thinkDeeply(questionForModel, pages));
 
     await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
-    // Всегда файлом, а не по длине (см. sendAnswer): в этом и смысл команды —
-    // развёрнутый разбор, а не сообщение, обрезанное под лимит Telegram.
-    await sendAnswerAsFile(ctx, answer.text, 'md', question);
-
+    // Только файлом, без сопроводительного сообщения в чат (см. описание выше):
+    // подпись с ценой и остатком, предупреждение об обрыве и топ-20 источников
+    // дописываются внутрь .md — чат получает один файл и ничего кроме него.
+    // Кап DEEP_MAX_TOKENS не трогаем, развёрнутость — на усмотрении модели.
     const price = typeof answer.costUsd === 'number' ? `$${answer.costUsd.toFixed(3)}` : 'платно';
     // Объём мыслей показываем рядом с потолком, и это не любопытство:
     // по этой паре и настраиваются DEEP_EFFORT с DEEP_MAX_TOKENS. Упёрлась
@@ -1249,25 +1274,24 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
         'по одному дню, по одному пункту, — или поднимите DEEP_MAX_TOKENS.'
       : '';
 
-    // Источники — ссылками под ответом, как у «!сети». Ответ мог уехать
-    // файлом, а ссылки нужны в чате, поэтому они в подписи, а не в тексте.
-    // Разметка здесь своя, HTML: подпись — служебная строка, и гонять её
-    // через markdown-конвертер незачем.
-    const sources =
-      pages.length > 0
-        ? `\n\n<b>Смотрел${pages.length > 5 ? ` (${pages.length} страниц, вот первые пять)` : ''}:</b>\n` +
-          pages
-            .slice(0, 5)
-            .map((page) => `• <a href="${escapeHtml(page.url)}">${escapeHtml(shortTitle(page.title))}</a>`)
-            .join('\n')
-        : '';
     const grounded = pages.length > 0 ? `, страниц ${pages.length}` : ', без свежих страниц';
+    const footer =
+      `\n\n---\n\n*Думала \`${answer.model}\`, ${Math.round(answer.elapsedMs / 1000)} с${thoughts}${grounded}, ${price}. ` +
+      `Осталось на сегодня: ${quota.remaining} из ${quota.limit}.*${cut}`;
 
-    await ctx.reply(
-      `<i>Думала <code>${escapeHtml(answer.model)}</code>, ${Math.round(answer.elapsedMs / 1000)} с${thoughts}${grounded}, ${price}. ` +
-        `Осталось на сегодня: ${quota.remaining} из ${quota.limit}.</i>${cut}${sources}`,
-      { parse_mode: 'HTML', link_preview_options: { is_disabled: true } },
-    );
+    // Топ-20 источников — внутрь файла, а не в чат: ответ уезжает .md всегда,
+    // и ссылки нужны там же, где текст, а не отдельным сообщением.
+    const sourcesSection =
+      pages.length > 0
+        ? `\n\n## Источники\n${pages
+            .slice(0, 20)
+            .map((page, index) => `${index + 1}. ${sourceLink(page.title, page.url)}`)
+            .join('\n')}`
+        : '';
+
+    // Всегда файлом, а не по длине (см. sendAnswer): в этом и смысл команды —
+    // развёрнутый разбор, а не сообщение, обрезанное под лимит Telegram.
+    await sendAnswerAsFile(ctx, answer.text + footer + sourcesSection, 'md', question);
 
     // В архив поиска — да, в историю раздела — нет (см. описание выше).
     const key = sessionKey(ctx);
@@ -1390,12 +1414,33 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
   // без своих рассуждений (см. NEWS_DIGEST_RULE). Вход — ~8000 токенов
   // (5 страниц по 4000 знаков), отсюда и потолок 4000: выжимке нужно место
   // развернуться, а резать её — терять факты.
-  const digest = await generateWithFallback(levels, buildSearchPrompt(topic, pages), {
-    maxOutputTokens: config.ai.webDigestMaxOutputTokens,
-    extraInstruction: NEWS_DIGEST_RULE,
-    // Свой таймаут: см. config.ai.webTimeoutMs — запрос сюда тяжелее обычного.
-    timeoutMs: config.ai.webTimeoutMs,
-  });
+  //
+  // При отказе kind=timeout повторяем ОДИН раз на следующем уровне из
+  // переупорядоченного списка (levels.slice(1)): обычно это значит «луна
+  // не ответила — спросить Gemini-хвост». Худший случай — 240 с (два таймаута
+  // по 120 с), но луна отвечает ~1 с, так что ретрай — только страховка
+  // от разового зависания. Глобальный RETRYABLE не трогаем: там таймаут
+  // неперебираемый сознательно, второй проход не ретраим тоже.
+  let digest;
+  try {
+    digest = await generateWithFallback(levels, buildSearchPrompt(topic, pages), {
+      maxOutputTokens: config.ai.webDigestMaxOutputTokens,
+      extraInstruction: NEWS_DIGEST_RULE,
+      // Свой таймаут: см. config.ai.webTimeoutMs — запрос сюда тяжелее обычного.
+      timeoutMs: config.ai.webTimeoutMs,
+    });
+  } catch (error) {
+    const timedOut = error instanceof ProviderRequestError && error.kind === 'timeout';
+    if (!timedOut || levels.length < 2) throw error;
+    logger.warn('Первый проход «!сети» упёрся в таймаут, повторяю раз на следующем уровне', {
+      levels: levels.length,
+    });
+    digest = await generateWithFallback(levels.slice(1), buildSearchPrompt(topic, pages), {
+      maxOutputTokens: config.ai.webDigestMaxOutputTokens,
+      extraInstruction: NEWS_DIGEST_RULE,
+      timeoutMs: config.ai.webTimeoutMs,
+    });
+  }
 
   const links = pages.slice(0, 5).map((page) => sourceLink(page.title, page.url));
   // Место под список источников вычитается заранее — второй проход целится
@@ -1533,7 +1578,9 @@ async function handleLimits(ctx: BotContext): Promise<void> {
   const rows = await Promise.all(
     items.map(async ({ icon, label, quota }) => {
       const peeked = await quota.peek(userId);
-      return `${icon} ${label}: ${peeked ? `${peeked.used}/${peeked.limit}` : 'без нормы'}`;
+      if (!peeked) return `${icon} ${label}: без нормы`;
+      const left = Math.max(0, peeked.limit - peeked.used);
+      return `${icon} ${label}: ${peeked.used}/${peeked.limit}, осталось ${left}, сброс через ${peeked.resetsIn}`;
     }),
   );
 
@@ -1693,8 +1740,12 @@ async function handleSpeak(ctx: BotContext, request: string): Promise<void> {
   try {
     const speech = await withChatAction(ctx, 'record_voice', () => synthesizeSpeech(text, voiceRequest));
 
+    // Итоговый голос — тот, что реально пошёл в синтез (заказ или дефолт из
+    // настроек, если своего не назвали): фолбэк request.voice ?? config.tts.voice
+    // живёт внутри synthesizeSpeech, наружу возвращается только запись.
+    const finalVoice = voiceRequest.voice ?? config.tts.voice;
     const notes = [
-      directionNote ? `голос: ${directionNote}` : '',
+      directionNote ? `голос: ${directionNote} → ${finalVoice}` : `голос: ${finalVoice}`,
       speech.skipped.length > 0 ? 'озвучивала запасная модель' : '',
       trimmed ? `прочитано ${text.length} знаков из ${plain.length}` : '',
     ].filter(Boolean);
@@ -1730,12 +1781,12 @@ async function handleSpeak(ctx: BotContext, request: string): Promise<void> {
  * черновик, и лишь затем дневная норма и заказ. Занимать слот нормы раньше
  * значит списать его за неудавшийся черновик, а он не стоил ничего.
  *
- * Подтверждения кнопками здесь, в отличие от рисования, нет намеренно.
- * У картинки уточняющие вопросы окупаются: пропущенный стиль или кадр видно
- * сразу, и переделка стоит столько же, сколько попадание. У песни главное —
- * слова, а они и так приходят человеку до трека: они показываются, пока
- * модель пишет музыку. Спрашивать «начинать?» после того, как текст уже
- * написан, значит удваивать шаги ради того же результата.
+ * Деньги тратятся только по кнопке «Заказать» под показанными словами —
+ * как подтверждение «Рисовать» у картинок (см. src/commands/draw.ts):
+ * черновик лежит в сессии раздела (по одному на человека, TTL те же 30 минут),
+ * слот нормы занимается лишь по нажатию. Слова человек видит заранее и может
+ * отменить заказ, ничего не потратив. Без вокала слов нет — кнопка всё равно
+ * нужна: длительность и стиль тоже стоит подтвердить.
  */
 /**
  * Убирает служебные теги структуры песни ([verse], [chorus], [bridge], ...)
@@ -1799,10 +1850,106 @@ async function handleTrack(ctx: BotContext, request: string): Promise<void> {
   const instrumental = isInstrumental(plan);
   const title = plan.title || request.slice(0, 60);
 
+  /**
+   * Теги структуры ([verse], [chorus], [bridge]) убираем из того, что видит
+   * человек и что уходит в саму генерацию (подробно — см. комментарий
+   * в orderTrack ниже: модель их, похоже, поёт как есть на русских словах).
+   */
+  const lyrics = instrumental ? plan.lyrics : humanizeLyrics(plan.lyrics);
+
+  // План показан — заказ только по кнопке. Черновик в сессии, слот нормы
+  // ещё не занят: отмена ничего не стоит по построению.
+  setTrackDraft(ctx, {
+    title,
+    stylePrompt: plan.stylePrompt,
+    ...(plan.negativeStylePrompt ? { negativeStylePrompt: plan.negativeStylePrompt } : {}),
+    lyrics,
+    duration,
+    instrumental,
+  });
+  await ctx.reply(await trackConfirmText(ctx, getTrackDraft(ctx)!, false), {
+    parse_mode: 'HTML',
+    reply_markup: trackConfirmKeyboard(),
+  });
+}
+
+/** Достаёт черновики треков раздела, попутно выбрасывая протухшие (TTL — тот же, что у рисования). */
+function trackDrafts(ctx: BotContext): Record<string, TrackDraft> {
+  const all = ctx.session.trackDrafts ?? {};
+  const deadline = Date.now() - config.draw.draftTtlMin * 60 * 1000;
+
+  for (const [userId, draft] of Object.entries(all)) {
+    if (draft.updatedAt < deadline) delete all[userId];
+  }
+
+  ctx.session.trackDrafts = all;
+  return all;
+}
+
+function getTrackDraft(ctx: BotContext): TrackDraft | undefined {
+  const userId = ctx.from?.id;
+  return userId === undefined ? undefined : trackDrafts(ctx)[String(userId)];
+}
+
+function setTrackDraft(ctx: BotContext, draft: Omit<TrackDraft, 'updatedAt'>): void {
+  const userId = ctx.from?.id;
+  if (userId === undefined) return;
+  trackDrafts(ctx)[String(userId)] = { ...draft, updatedAt: Date.now() };
+}
+
+function clearTrackDraft(ctx: BotContext): void {
+  const userId = ctx.from?.id;
+  if (userId !== undefined) delete trackDrafts(ctx)[String(userId)];
+}
+
+/** Клавиатура подтверждения заказа: деньги — только по «Заказать». */
+function trackConfirmKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text('🎵 Заказать', `${TRACK_CB}:go`).row().text('✖️ Отмена', `${TRACK_CB}:cancel`);
+}
+
+/**
+ * Слова для показа в чате. У подписей к аудио лимит 1024 знака, а слов
+ * всё равно захотят прочесть — поэтому они идут отдельным сообщением,
+ * которое заодно и подтверждение заказа.
+ *
+ * Порядок «сначала обрезать, потом экранировать» существенен. Наоборот
+ * — значит однажды разрезать сущность пополам: «&amp;» превращается
+ * в «&am», Telegram отвечает «can't parse entities», и человек не получает
+ * ни слов, ни трека.
+ */
+function trackLyricsBlock(draft: TrackDraft): string {
+  return draft.instrumental ? '<i>Без вокала.</i>' : escapeHtml(draft.lyrics.slice(0, 3000));
+}
+
+/** Текст подтверждения: что закажем, почём и сколько останется на сегодня. */
+async function trackConfirmText(ctx: BotContext, draft: TrackDraft, writing: boolean): Promise<string> {
+  const quota = await trackQuota.peek(ctx.from?.id);
+  const left = quota ? `\nОстанется на сегодня: ${Math.max(0, quota.limit - quota.used - 1)} из ${quota.limit}` : '';
+  const cost = `~${draft.duration} с, ~$${(draft.duration * config.goapi.music.pricePerSecondUsd).toFixed(3)}${left}`;
+
+  return [
+    `🎵 <b>${escapeHtml(draft.title)}</b>`,
+    '',
+    `<i>${escapeHtml(draft.stylePrompt)}</i>`,
+    `<i>${cost}</i>`,
+    '',
+    trackLyricsBlock(draft),
+    ...(writing ? ['', '<i>Пишу…</i>'] : []),
+  ].join('\n');
+}
+
+/**
+ * Единственное место, где тратятся деньги на музыку.
+ *
+ * Слот дневной нормы занимается до вызова и возвращается при неудаче:
+ * генерация идёт десятки секунд, за это время можно нажать кнопку ещё раз.
+ */
+async function orderTrack(ctx: BotContext, draft: TrackDraft): Promise<void> {
   const userId = ctx.from?.id;
   const quota = await trackQuota.reserve(userId);
 
   if (!quota.allowed) {
+    clearTrackDraft(ctx);
     await ctx.reply(
       `🚫 На сегодня треки закончились: ${quota.limit} в день на человека — музыка стоит денег.\n\n` +
         `Норма обновится через ${quota.resetsIn}. Текст песни, если он нужен, я напишу и без музыки: ` +
@@ -1812,45 +1959,17 @@ async function handleTrack(ctx: BotContext, request: string): Promise<void> {
     return;
   }
 
-  /**
-   * Теги структуры ([verse], [chorus], [bridge]) убираем не только из того,
-   * что видит человек, но и из того, что уходит в саму генерацию.
-   *
-   * По документации Ace-Step это специальные токены структуры, а не текст, —
-   * но на практике, на русских словах, модель их, похоже, поёт как есть:
-   * «bridge» звучит в записи наравне со словами песни (замечено на живых
-   * треках 21.08.2026). Модель в основном учена на английских текстах,
-   * и с русским вперемешку с тегами распознаёт их не так надёжно, как для
-   * английского. Раз структура всё равно ломается, а текст короткий
-   * (LYRICS_LINES = 6-8 строк, без нескольких куплетов и явного bridge),
-   * проще вовсе не размечать — и Telegram, и API получают один и тот же
-   * humanizeLyrics-текст, без тегов.
-   */
-  const lyrics = instrumental ? plan.lyrics : humanizeLyrics(plan.lyrics);
-
-  /**
-   * Слова показываются сразу, пока пишется музыка: их всё равно захотят
-   * прочесть, а в подпись к аудио они не влезут — у Telegram там 1024 знака.
-   *
-   * Порядок «сначала обрезать, потом экранировать» существенен. Наоборот
-   * — значит однажды разрезать сущность пополам: «&amp;» превращается
-   * в «&am», Telegram отвечает «can't parse entities», и человек не получает
-   * ни слов, ни трека, хотя слот дневной нормы уже занят.
-   */
-  const lyricsBlock = instrumental ? '<i>Без вокала.</i>' : escapeHtml(lyrics.slice(0, 3000));
-
-  const notice = await ctx.reply(
-    [`🎵 <b>${escapeHtml(title)}</b> — пишу…`, '', `<i>${escapeHtml(plan.stylePrompt)}</i>`, '', lyricsBlock].join('\n'),
-    { parse_mode: 'HTML' },
-  );
+  await ctx.editMessageText(await trackConfirmText(ctx, draft, true), {
+    parse_mode: 'HTML',
+  });
 
   try {
     const track = await withChatAction(ctx, 'upload_document', () =>
       generateTrack({
-        stylePrompt: plan.stylePrompt,
-        negativeStylePrompt: plan.negativeStylePrompt,
-        lyrics,
-        duration,
+        stylePrompt: draft.stylePrompt,
+        ...(draft.negativeStylePrompt ? { negativeStylePrompt: draft.negativeStylePrompt } : {}),
+        lyrics: draft.lyrics,
+        duration: draft.duration,
       }),
     );
 
@@ -1858,31 +1977,32 @@ async function handleTrack(ctx: BotContext, request: string): Promise<void> {
     const extension = track.mimeType === 'audio/wav' ? 'wav' : 'mp3';
 
     await ctx.replyWithAudio(new InputFile(track.data, `track.${extension}`), {
-      title,
+      title: draft.title,
       performer: 'Ace-Step',
       duration: track.duration,
       caption:
-        `🎵 <b>${escapeHtml(title)}</b>\n` +
-        `<i>${duration} с, $${track.costUsd.toFixed(3)}, готовилось ${(track.elapsedMs / 1000).toFixed(0)} с${left}</i>`,
+        `🎵 <b>${escapeHtml(draft.title)}</b>\n` +
+        `<i>${draft.duration} с, $${track.costUsd.toFixed(3)}, готовилось ${(track.elapsedMs / 1000).toFixed(0)} с${left}</i>`,
       parse_mode: 'HTML',
     });
 
-    // Сообщение с текстом остаётся в разделе — под ним и подпевают, — но «пишу…»
-    // из него убираем: работа кончилась.
-    await ctx.api
-      .editMessageText(
-        notice.chat.id,
-        notice.message_id,
-        [`🎵 <b>${escapeHtml(title)}</b>`, '', `<i>${escapeHtml(plan.stylePrompt)}</i>`, '', lyricsBlock].join('\n'),
-        { parse_mode: 'HTML' },
-      )
+    // Слова остаются в разделе — под ними и подпевают, — «пишу…» убираем.
+    clearTrackDraft(ctx);
+    await ctx
+      .editMessageText(await trackConfirmText(ctx, draft, false), { parse_mode: 'HTML' })
       .catch(() => undefined);
   } catch (error) {
     // Трек не вышел — слот нормы возвращаем: платим за музыку, а не за попытку.
     // GoAPI берёт деньги за завершённую задачу, так что отказ на заказе или
-    // в очереди не стоит ничего.
+    // в очереди не стоит ничего. Черновик оставляем и возвращаем кнопки —
+    // можно попробовать ещё раз без нового плана.
     await trackQuota.release(userId);
-    await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
+    await ctx
+      .editMessageText(await trackConfirmText(ctx, draft, false), {
+        parse_mode: 'HTML',
+        reply_markup: trackConfirmKeyboard(),
+      })
+      .catch(() => undefined);
     await replyWithError(ctx, error);
   }
 }
@@ -2074,9 +2194,10 @@ function formatDuration(seconds: number): string {
  * слышит, и отказ этот неперебираемый (см. config.gemini.chains.voice). А сама запись перед отправкой
  * проходит через prepareVoice — это про формат, см. src/services/voice.ts.
  *
- * В историю раздела попадает только пометка о том, что голосовое было, и
- * ответ бота. Само сказанное там не сохраняется — как и содержимое снимков.
- * На продолжение разговора этого хватает: о чём шла речь, видно из ответа.
+ * В историю раздела попадают маркер голосового с конспектом сказанного
+ * (~1000 знаков из ответа модели) и ответ бота. Само аудио там не сохраняется —
+ * как и содержимое снимков. На продолжение разговора этого хватает: о чём шла
+ * речь, видно из конспекта и ответа.
  */
 async function handleVoice(ctx: BotContext, voice: VoiceMessage, question: string): Promise<void> {
   // Дословная выписка — единственный ответ по голосовому, который обязан быть
@@ -2105,11 +2226,28 @@ async function handleVoice(ctx: BotContext, voice: VoiceMessage, question: strin
       asked: question || '(без вопроса)',
     });
 
-    await askChain(ctx, gemini, resolveChain(VOICE_CHAIN), `${VOICE_RULE}\n\n${question || VOICE_DEFAULT_TASK}`, {
+    const marker = `Прислал голосовое (${length}).${verbatim ? ' Расшифровка.' : question ? ` ${question}` : ''}`;
+    const ok = await askChain(ctx, gemini, resolveChain(VOICE_CHAIN), `${VOICE_RULE}\n\n${question || VOICE_DEFAULT_TASK}`, {
       attachments: [audio],
-      historyText: `Прислал голосовое (${length}).${verbatim ? ' Расшифровка.' : question ? ` ${question}` : ''}`,
+      historyText: marker,
       ...(verbatim ? { answerLength: 'unbounded' as const } : {}),
     });
+
+    // В историю — маркер + конспект сказанного (~1000 знаков), а не голый
+    // маркер: иначе дальше по разговору модель видит вопрос по голосовому,
+    // но не то, о чём в нём говорилось. Отдельного STT-прохода нет, поэтому
+    // конспект берём из ответа модели: при «!расшифруй» это дословная выписка,
+    // при ответе по существу — суть сказанного. Запись правим на месте, новых
+    // сообщений в историю не добавляем — бюджет живого хвоста те же 15.
+    if (ok && config.ai.historyMaxTokens > 0) {
+      const history = ctx.session.history;
+      const prev = history[history.length - 2];
+      const last = history[history.length - 1];
+      if (prev?.role === 'user' && last?.role === 'assistant' && prev.text.includes(marker)) {
+        const summary = last.text.replace(/\s+/g, ' ').trim().slice(0, 1000);
+        if (summary) prev.text += `\nКонспект: ${summary}`;
+      }
+    }
   } catch (error) {
     await replyWithError(ctx, error);
   }
@@ -2139,6 +2277,28 @@ async function handlePhotos(ctx: BotContext, fileIds: string[], caption: string)
 
 // ВНИМАНИЕ-ловушка: registerAiCommands ставит терминальный bot.on('message:text') (без next()). Любой bot.command/hears/on('message:text'), зарегистрированный ПОСЛЕ него, недостижим — grammy идёт по middleware по порядку. Новые команды — только ДО registerAiCommands либо с next().
 export function registerAiCommands(bot: Bot<BotContext>): void {
+  // Кнопки заказа трека: черновик в сессии + TTL, деньги только по «Заказать»
+  // (см. handleTrack/orderTrack выше). Чужая кнопка чужой черновик не трогает:
+  // черновик ищется по id нажавшего, чужому отвечает «протух».
+  bot.callbackQuery(`${TRACK_CB}:go`, async (ctx) => {
+    const draft = getTrackDraft(ctx);
+    if (!draft) {
+      await ctx.answerCallbackQuery({ text: 'Этот заказ уже не действует — попросите заново.', show_alert: true });
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
+    await orderTrack(ctx, draft);
+  });
+
+  bot.callbackQuery(`${TRACK_CB}:cancel`, async (ctx) => {
+    // Слот нормы при отмене возвращать нечего — он ещё не занимался, так задумано.
+    clearTrackDraft(ctx);
+    await ctx.answerCallbackQuery({ text: 'Отменено' });
+    await ctx.editMessageText('✖️ Заказ отменён. Ничего не потрачено.');
+  });
+
   // ------------------------------------------------------- /gem и /гем
   bot.command('gem', async (ctx, next) => {
     // Команда в подписи к фотографии — не наше дело: снимок разбирает

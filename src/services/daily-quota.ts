@@ -38,7 +38,7 @@ export type QuotaDecision =
 /** Одна норма: занять слот, подсмотреть остаток, вернуть слот назад, обнулить. */
 export interface DailyQuota {
   reserve(userId: number | undefined): Promise<QuotaDecision>;
-  peek(userId: number | undefined): Promise<{ used: number; limit: number } | null>;
+  peek(userId: number | undefined): Promise<{ used: number; limit: number; resetsIn: string } | null>;
   release(userId: number | undefined): Promise<void>;
   reset(userId: number | undefined): Promise<number>;
 }
@@ -190,6 +190,7 @@ function createDailyQuota({ file, what, limit: limitOf, timezone }: QuotaOptions
     /**
      * Сколько потрачено на сегодня, без списания. Нужно, чтобы показать остаток
      * ещё до траты — в подтверждении, когда деньги ещё не ушли.
+     * resetsIn — тут же, чтобы «!лимиты» показывали и остаток, и время сброса.
      */
     async peek(userId) {
       const limit = limitOf();
@@ -197,7 +198,7 @@ function createDailyQuota({ file, what, limit: limitOf, timezone }: QuotaOptions
 
       await load();
       const record = records.get(userId);
-      return { used: record?.day === currentDay() ? record.used : 0, limit };
+      return { used: record?.day === currentDay() ? record.used : 0, limit, resetsIn: timeUntilReset() };
     },
 
     /**

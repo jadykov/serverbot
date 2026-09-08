@@ -39,6 +39,15 @@ import type { BotContext, DrawDraft } from '../types.js';
 const CB = 'd';
 
 /**
+ * Фактическая цена последней картинки — usage.cost из ответа Krea
+ * (см. generate ниже: подпись уже показывает image.costUsd оттуда же).
+ * Node однопоточный, гонок нет — обычной модульной переменной достаточно.
+ * Нужна, чтобы экран подтверждения показывал живую цену («последняя вышла
+ * $X»), а не только ориентир-константу: тарифы меняются, а факт — нет.
+ */
+let lastImageCostUsd: number | undefined;
+
+/**
  * Кто собирает промпт: быстрая цепочка (L1 Gemini lite-голова → L2 OpenRouter
  * luna→contrib → L3 Gemma-хвост) — та же, что у !скажи и !трек (см. commands/ai.ts). Раньше
  * разговор вёл то THINK_CHAIN, то «light» (картинка стоит денег и нормирована —
@@ -164,6 +173,8 @@ function questionText(draft: DrawDraft): string {
 async function confirmText(ctx: BotContext, draft: DrawDraft): Promise<string> {
   const quota = await imageQuota.peek(ctx.from?.id);
   const left = quota ? `\nОстанется на сегодня: ${Math.max(0, quota.limit - quota.used - 1)} из ${quota.limit}` : '';
+  // Константа — ориентир для первого заказа; у повторных рядом живой факт.
+  const last = lastImageCostUsd !== undefined ? `, последняя вышла $${lastImageCostUsd.toFixed(4)}` : '';
 
   return [
     '🎨 <b>Нарисую вот это:</b>',
@@ -171,7 +182,7 @@ async function confirmText(ctx: BotContext, draft: DrawDraft): Promise<string> {
     '',
     `<i>Промпт: ${escapeHtml(draft.prompt)}</i>`,
     `<i>Форма: ${escapeHtml(draft.aspectRatio)} — ${ratioShape(draft.aspectRatio)}</i>`,
-    `<i>Примерно $0,015${left}</i>`,
+    `<i>Примерно $0,015${last}${left}</i>`,
   ].join('\n');
 }
 
@@ -284,6 +295,7 @@ async function generate(ctx: BotContext, draft: DrawDraft): Promise<void> {
     );
 
     const extension = image.mimeType === 'image/jpeg' ? 'jpg' : 'png';
+    if (typeof image.costUsd === 'number') lastImageCostUsd = image.costUsd;
     const price = image.costUsd !== undefined ? `, $${image.costUsd.toFixed(4)}` : '';
     const left = Number.isFinite(quota.remaining) ? `\nОсталось на сегодня: ${quota.remaining} из ${quota.limit}` : '';
 

@@ -17,6 +17,7 @@ import { BOT_COMMANDS, createBot } from './bot.js';
 import { createHttpServer, listen } from './server.js';
 import { describeProviders } from './services/registry.js';
 import { flushAll } from './services/search-index.js';
+import { savePending } from './services/digest.js';
 
 async function main(): Promise<void> {
   assertConfigValid();
@@ -80,6 +81,9 @@ async function main(): Promise<void> {
       // Без этой строчки каждая выкатка тихо теряла бы последние сообщения
       // каждого раздела: в архив поиска они бы уже не попали никогда.
       await flushAll();
+      // Недосчитанный буфер долгой памяти (до 50 реплик) — на диск,
+      // иначе рестарт молча терял бы кусок раздела.
+      await savePending();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       logger.info('Остановлено штатно. Пока!');
       process.exit(0);
