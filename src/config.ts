@@ -806,15 +806,15 @@ export const config = {
 
   openai: {
     apiKey: env('OPENAI_API_KEY') ?? '',
-    baseUrl: envString('OPENAI_BASE_URL', 'https://api.openai.com/v1').replace(/\/+$/, ''),
+    baseUrl: envString('OPENAI_BASE_URL', 'https://openrouter.ai/api/v1').replace(/\/+$/, ''),
     model: envString('OPENAI_MODEL', 'gpt-4o-mini'),
     /**
      * Цепочки поверх OpenAI-совместимого API (п.3 плана: OpenRouter pay-as-you-go).
      *
      * Тот же провайдер, что выше: OpenRouter притворяется OpenAI
-     * (`POST {baseUrl}/chat/completions`), поэтому достаточно завернуть
-     * `OPENAI_BASE_URL=https://openrouter.ai/api/v1` и положить ключ —
-     * новый класс провайдера не нужен (см. services/openai-compatible.ts).
+     * (`POST {baseUrl}/chat/completions`), дефолт baseUrl — уже OpenRouter,
+     * для нативного OpenAI переопредели OPENAI_BASE_URL
+     * (см. services/openai-compatible.ts).
      *
       * smart — умная голова (`contrib → luna`), fast — быстрая
       * (`contrib → luna` для формальных JSON-планов: точный плоский порядок
