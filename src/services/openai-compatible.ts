@@ -55,7 +55,7 @@ export class OpenAiCompatibleProvider implements TextProvider {
         role: 'system',
         content: [
           options.systemPrompt ??
-            'Ты — ассистент в Telegram-боте. Отвечай кратко, на языке пользователя. ' +
+            'Ты — ассистент в Telegram-боте. Отвечай живо и по делу, на языке пользователя. ' +
               'Оформляй ответ в Markdown: **жирный**, *курсив*, `код`, блоки кода, ссылки, списки через дефис. ' +
               'Без таблиц, вложенных списков и HTML-тегов.',
           options.extraInstruction?.trim() ?? '',
