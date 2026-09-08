@@ -33,8 +33,8 @@
  *
  * Первые уровни обеих двухуровневых цепочек живут на OpenRouter (см.
  * config.openai.chains и resolveSmartLevels/resolveFastLevels в registry.ts):
- * smart — contrib → full → luna, fast — середина luna → contrib (точный плоский
- * порядок владельца: lite-голова → luna → contrib → Gemma-хвост). За ними —
+ * smart — contrib → luna, fast — середина contrib → luna (точный плоский
+  * порядок владельца: lite-голова → contrib → luna → Gemma-хвост). За ними —
  * Gemini-хвосты из config.gemini.chains.
  *
  * Сами имена моделей лежат в конфигурации и правятся через .env —
@@ -55,11 +55,11 @@ export const VOICE_CHAIN = 'voice';
  * Умная и быстрая цепочки (п.3 плана: OpenRouter pay-as-you-go + Gemini-хвост).
  *
  * smart — всё содержательное: разговор, картинки, документы,
- * «!сеть», «!файл». Первый уровень `OPENAI_CHAIN_SMART` (contrib→full→luna),
+ * «!сеть», «!файл». Первый уровень `OPENAI_CHAIN_SMART` (contrib→luna),
  * второй — Gemini main-хвост. Замер contrib-про-пустоту и пол 4000
  * в registry.ts сохранены: потолок smart не опускать ниже 4000.
  * fast — формальные JSON-планы (рисование, !скажи, !трек): три уровня
- * (L1 Gemini lite-голова → L2 OpenRouter luna→contrib → L3 Gemma-хвост,
+ * (L1 Gemini lite-голова → L2 OpenRouter contrib→luna → L3 Gemma-хвост,
  * см. resolveFastLevels), второй — отдельный Gemini fast-хвост
  * (GEMINI_CHAIN_FAST, не LIGHT).
  *
@@ -100,7 +100,7 @@ export function listChains(): ChainInfo[] {
     {
       id: FAST_CHAIN,
       title: 'Быстрый',
-      hint: 'Служебные планы (рисование, озвучка, треки). Уровни: lite-голова, OpenRouter (luna→contrib), Gemma-хвост.',
+      hint: 'Служебные планы (рисование, озвучка, треки). Уровни: lite-голова, OpenRouter (contrib→luna), Gemma-хвост.',
       models: config.gemini.chains.fast,
       maxOutputTokens: config.gemini.maxOutput.main,
     },

@@ -125,7 +125,7 @@ export async function generateWithFallback(
   throw new ProviderNotConfiguredError(textProviders.map((provider) => provider.setupHint));
 }
 
-/** Уровни умной цепочки: OpenRouter (contrib→full→luna) → Gemini. Пусто — только Gemini. */
+/** Уровни умной цепочки: OpenRouter (contrib→luna) → Gemini. Пусто — только Gemini. */
 export function resolveSmartLevels(fallbackModels: string[], fallbackMaxTokens: number): ChainLevel[] {
   const openai = findTextProvider('openai');
   const levels: ChainLevel[] = [];
@@ -144,7 +144,7 @@ export function resolveSmartLevels(fallbackModels: string[], fallbackMaxTokens: 
   return levels;
 }
 
-/** Уровни быстрой цепочки (JSON-планы): точный плоский порядок владельца 3.5-lite → 3.1-lite → luna → contrib → gemma. */
+/** Уровни быстрой цепочки (JSON-планы): точный плоский порядок владельца 3.5-lite → 3.1-lite → contrib → luna → gemma. */
 export function resolveFastLevels(): ChainLevel[] {
   const levels: ChainLevel[] = [];
   const gemini = findTextProvider('gemini');
@@ -155,7 +155,7 @@ export function resolveFastLevels(): ChainLevel[] {
   if (gemini && liteHead.length > 0) {
     levels.push({ provider: gemini, models: liteHead, maxOutputTokens: config.gemini.maxOutput.main });
   }
-  // L2 OpenRouter: luna → contrib (порядок из OPENAI_CHAIN_FAST). Потолок fast
+  // L2 OpenRouter: contrib → luna (порядок из OPENAI_CHAIN_FAST). Потолок fast
   // 2000 и общий таймаут 90с: luna отвечает за ~1с, формальным планам хватает.
   const openai = findTextProvider('openai');
   if (openai?.isConfigured && config.openai.chains.fast.length > 0) {
@@ -204,8 +204,7 @@ function reorderWebModels(models: string[]): string[] {
 }
 
 /**
- * Уровни «!сеть»: L1 OpenRouter luna (мини-!размышление — только луна,
- * без contrib: выжимка фактов не нуждается в дешёвом обучении на промптах),
+ * Уровни «!сеть»: L1 OpenRouter contrib→luna (contrib голова, luna запас),
  * L2 Gemini-хвост тем же спецпорядком (3.5 → … → 3.7 → gemma).
  *
  * Потолки на проход задаёт вызывающий код явно (WEB_DIGEST_/WEB_FINAL_MAX_OUTPUT_TOKENS);
@@ -214,13 +213,20 @@ function reorderWebModels(models: string[]): string[] {
 export function resolveWebLevels(fallbackModels: string[]): ChainLevel[] {
   const levels: ChainLevel[] = [];
   const openai = findTextProvider('openai');
-  // Только luna: фильтр из OPENAI_CHAIN_SMART, а не отдельный ключ.
-  const luna = config.openai.chains.smart.filter((model) => /luna/i.test(model));
-  const lunaModels = luna.length > 0 ? luna : ['openai/gpt-5.6-luna'];
+  // Явный порядок contrib→luna из OPENAI_CHAIN_SMART, а не отдельный ключ:
+  // берём только эти две модели (по любому префиксу), недостающих просто
+  // нет в списке; если нет ни одной — запасная luna, чтобы уровень не пустовал.
+  const headModels = config.openai.chains.smart
+    .filter((model) => /contributor|luna/i.test(model))
+    .sort((a, b) => {
+      const rank = (model: string): number => (/contributor/i.test(model) ? 0 : 1);
+      return rank(a) - rank(b);
+    });
+  const webModels = headModels.length > 0 ? headModels : ['openai/gpt-5.6-luna'];
   if (openai?.isConfigured) {
     levels.push({
       provider: openai,
-      models: lunaModels,
+      models: webModels,
       maxOutputTokens: config.ai.webDigestMaxOutputTokens,
       timeoutMs: config.ai.webTimeoutMs,
     });

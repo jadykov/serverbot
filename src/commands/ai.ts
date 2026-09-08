@@ -615,7 +615,7 @@ async function askChain(
     const history = takeHistory(ctx.session.history, config.ai.historySend);
 
     // Двухуровневый фолбэк (п.3 плана): для умных цепочек сначала спрашиваем
-    // OpenRouter (contrib→full→luna), при отказе всей его цепочки — Gemini-хвост.
+    // OpenRouter (contrib→luna), при отказе всей его цепочки — Gemini-хвост.
     // Голосовая идёт только через Gemini: звук на OpenRouter не проверен.
     // Уровни собираются здесь, а не в models.ts: ChainInfo хранит один список,
     // а уровней два (провайдер+цепочка у каждого свои).
@@ -1306,8 +1306,8 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
 /**
  * Живой поиск: «/гем !сеть ...».
  *
- * Только Tavily: он отдаёт страницы, а ответ по ним пишут web-уровни
- * (L1 luna, L2 Gemini-хвост — см. resolveWebLevels). Денег это не стоит вовсе —
+  * Только Tavily: он отдаёт страницы, а ответ по ним пишут web-уровни
+  * (L1 contrib→luna, L2 Gemini-хвост — см. resolveWebLevels). Денег это не стоит вовсе —
  * тратится кредит из пакета и бесплатная норма Google, а разбор пяти
  * найденных страниц как раз тот случай, где голова помощнее не лишняя.
  *
@@ -1397,7 +1397,7 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
     return null;
   }
 
-  // Web-уровни (см. resolveWebLevels в services/registry.ts): L1 luna,
+  // Web-уровни (см. resolveWebLevels в services/registry.ts): L1 contrib→luna,
   // L2 Gemini-хвост. Модели и потолок берём у main-хвоста как запасной список.
   const levels = resolveWebLevels(config.gemini.chains.main);
   if (levels.length === 0) {

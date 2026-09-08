@@ -799,9 +799,9 @@ export const config = {
      * `OPENAI_BASE_URL=https://openrouter.ai/api/v1` и положить ключ —
      * новый класс провайдера не нужен (см. services/openai-compatible.ts).
      *
-     * smart — умная голова (`contrib → full → luna`), fast — быстрая
-     * (`luna → contrib` для формальных JSON-планов: точный плоский порядок
-     * владельца 3.5-lite → 3.1-lite → luna → contrib → gemma, где luna и
+      * smart — умная голова (`contrib → luna`), fast — быстрая
+      * (`contrib → luna` для формальных JSON-планов: точный плоский порядок
+      * владельца 3.5-lite → 3.1-lite → contrib → luna → gemma, где luna и
      * contrib — середина). За каждой — уровни на Gemini
      * (см. generateWithFallback в services/registry.ts).
      *
@@ -814,16 +814,15 @@ export const config = {
     chains: {
       smart: envStringList('OPENAI_CHAIN_SMART', [
         'meta/muse-spark-1.3-contributor',
-        'meta/muse-spark-1.3',
         'openai/gpt-5.6-luna',
       ]),
-      fast: envStringList('OPENAI_CHAIN_FAST', ['openai/gpt-5.6-luna', 'meta/muse-spark-1.3-contributor']),
+      fast: envStringList('OPENAI_CHAIN_FAST', ['meta/muse-spark-1.3-contributor', 'openai/gpt-5.6-luna']),
     },
     /**
      * Таймаут умной цепочки: contrib думает долго (полный ответ до ~13с
      * на длинном русском, vision — до 25с), 90с общего AI_TIMEOUT_MS ей
-     * впритык. Быстрый уровень идёт с общим AI_TIMEOUT_MS (90с): luna
-     * отвечает за ~1с, а contrib в хвосте L2 много не добавит.
+     * впритык. Быстрый уровень идёт с общим AI_TIMEOUT_MS (90с): contrib
+     * отвечает за секунды, а luna в запасе L2 много не добавит.
      */
     timeoutMs: envInt('OPENAI_TIMEOUT_MS', 120_000),
     maxOutput: {
