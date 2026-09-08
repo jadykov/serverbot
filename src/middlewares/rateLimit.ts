@@ -11,6 +11,7 @@
 import type { MiddlewareFn } from 'grammy';
 import { config, isAdmin } from '../config.js';
 import { logger } from '../logger.js';
+import { messagesQuota } from '../services/daily-quota.js';
 import type { BotContext } from '../types.js';
 
 /** userId -> метки времени последних запросов. */
@@ -52,6 +53,20 @@ export const rateLimit: MiddlewareFn<BotContext> = async (ctx, next) => {
 
   timestamps.push(now);
   hits.set(userId, timestamps);
+
+  // Дневная норма сообщений (MESSAGES_DAILY_LIMIT, по умолчанию 50):
+  // обычный «/гем» идёт по бесплатному Gemini, но норма у него общая на всех.
+  // Слот не возвращаем: middleware не знает, чем кончилась обработка, —
+  // считаются попытки, а не полученные ответы. Админы выше уже прошли мимо.
+  const slot = await messagesQuota.reserve(userId);
+  if (!slot.allowed) {
+    logger.warn('Дневная норма сообщений исчерпана', { userId, limit: slot.limit });
+    await ctx.reply(
+      `🚫 На сегодня лимит сообщений исчерпан: ${slot.limit} в день на человека.\n\n` +
+        `Норма обновится через ${slot.resetsIn}.`,
+    );
+    return;
+  }
 
   return next();
 };

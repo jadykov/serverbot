@@ -21,9 +21,13 @@
  * и модель, которая ищет, она же и отвечает. Второго обращения к нейросети
  * не нужно — а значит, не нужно и ждать дважды.
  *
- * Движок поиска выбирается отдельно от модели, и это главная экономия: цены
- * у движков различаются в разы ($0,001 у parallel против $0,007 у exa),
- * а модель к ним подходит любая. Оба параметра — в .env, без пересборки.
+ * Движка поиска в запросе больше нет: опция parallel убрана, выбор движка
+ * не отправляется вовсе — отвечает движок OpenRouter по умолчанию.
+ * OPENROUTER_WEB_ENGINE в config оставлен как deprecated (игнор), чтобы
+ * старый .env не падал.
+ *
+ * ВАЖНО: модуль отключён — «!сеть» идёт только через Tavily (см. handleWeb
+ * в commands/ai.ts), сюда бот не ходит. Код оставлен на случай возврата пути.
  */
 import { config } from '../config.js';
 import { logger } from '../logger.js';
@@ -122,7 +126,7 @@ export async function searchWeb(query: string): Promise<WebAnswer> {
     throw new ProviderRequestError('openrouter', WEB_SETUP_HINT, { kind: 'auth' });
   }
 
-  const { model, engine, maxResults } = config.openrouter.web;
+  const { model, maxResults } = config.openrouter.web;
   const startedAt = Date.now();
 
   let response: Response;
@@ -139,9 +143,9 @@ export async function searchWeb(query: string): Promise<WebAnswer> {
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: query },
         ],
-        // Собственно поиск. Движок и число страниц — из .env: цена запроса
-        // складывается почти целиком из них, а не из модели.
-        plugins: [{ id: 'web', engine, max_results: maxResults }],
+        // Собственно поиск. Число страниц — из .env; движок не выбираем:
+        // parallel убран, отвечает движок OpenRouter по умолчанию.
+        plugins: [{ id: 'web', max_results: maxResults }],
         // Просим вернуть фактическую стоимость вызова: считать её по прайсу
         // вслепую незачем, когда сервис сообщает точную сумму сам.
         usage: { include: true },
@@ -198,7 +202,6 @@ export async function searchWeb(query: string): Promise<WebAnswer> {
 
   logger.info('Живой поиск выполнен', {
     model,
-    engine,
     ms: elapsedMs,
     sources: sources.length,
     costUsd: data.usage?.cost,

@@ -220,7 +220,8 @@ export async function handleFile(ctx: BotContext, request: string): Promise<void
     return;
   }
 
-  // Умные уровни: OpenRouter-голова, потом Gemini think-хвост.
+  // Умные уровни: OpenRouter-голова, потом Gemini smart-хвост.
+  // (THINK_CHAIN ниже — алиас smart, см. models.ts: моделей и потолок те же.)
   const levels = resolveSmartLevels(resolveChain(THINK_CHAIN).models, config.files.maxOutputTokens);
   if (levels.length === 0) {
     await ctx.reply('🔌 Нейросеть не подключена — собирать файл некому.');

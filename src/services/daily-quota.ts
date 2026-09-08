@@ -6,9 +6,10 @@
  * минутный трек у Ace-Step — около $0,03, и без нормы один увлёкшийся
  * человек за вечер тратит бюджет всей группы.
  *
- * Норм четыре, и они независимы: картинки, треки, живой поиск и размышление
- * платятся разным сервисам и разными деньгами, так что общий счётчик врал бы
- * всем. Логика у них при этом одна до буквы — поэтому здесь фабрика,
+ * Норм шесть, и они независимы: картинки, треки, живой поиск, размышление,
+ * подробные разборы («!контекст») и озвучка («!скажи») считаются отдельно —
+ * общий счётчик врал бы всем сразу. Логика у них при этом одна до буквы —
+ * поэтому здесь фабрика, а не шесть похожих модулей.
  * а не четыре похожих модуля.
  *
  * Счётчик лежит на диске рядом с сессиями, а не в памяти процесса: иначе
@@ -270,6 +271,30 @@ export const deepQuota = createDailyQuota({
   timezone: () => config.deepQuota.timezone,
 });
 
+/** Норма на подробные разборы («!контекст»): бесплатный Gemini, но общая дневная норма у него одна на всех. */
+export const contextQuota = createDailyQuota({
+  file: 'context-quota.json',
+  what: 'подробных разборов',
+  limit: () => config.contextQuota.perUserPerDay,
+  timezone: () => config.contextQuota.timezone,
+});
+
+/** Норма на озвучку («!скажи»): у TTS-моделей общая норма маленькая, эта — личная. */
+export const ttsQuota = createDailyQuota({
+  file: 'tts-quota.json',
+  what: 'озвучек',
+  limit: () => config.tts.quota.perUserPerDay,
+  timezone: () => config.tts.quota.timezone,
+});
+
+/** Норма на сообщения боту: обычный «/гем» денег не стоит, но общая бесплатная норма Gemini одна на всех. */
+export const messagesQuota = createDailyQuota({
+  file: 'messages-quota.json',
+  what: 'сообщений',
+  limit: () => config.messagesQuota.perUserPerDay,
+  timezone: () => config.messagesQuota.timezone,
+});
+
 /**
  * Все нормы разом — для админского сброса.
  *
@@ -282,6 +307,9 @@ export const everyQuota: ReadonlyArray<{ what: string; quota: DailyQuota }> = [
   { what: 'треки', quota: trackQuota },
   { what: 'поиск', quota: webQuota },
   { what: 'размышления', quota: deepQuota },
+  { what: 'подробные разборы', quota: contextQuota },
+  { what: 'озвучка', quota: ttsQuota },
+  { what: 'сообщения', quota: messagesQuota },
 ];
 
 /**

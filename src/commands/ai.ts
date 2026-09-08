@@ -72,7 +72,7 @@ import {
   type WebPage,
 } from '../services/tavily.js';
 import { DEEP_SETUP_HINT, deepThoughtBudget, isDeepThinkConfigured, thinkDeeply } from '../services/openrouter-think.js';
-import { deepQuota, imageQuota, resetEveryQuota, trackQuota, webQuota, type DailyQuota } from '../services/daily-quota.js';
+import { contextQuota, deepQuota, imageQuota, resetEveryQuota, trackQuota, ttsQuota, webQuota, type DailyQuota } from '../services/daily-quota.js';
 import { handleFile, sendAnswerAsFile, takeAnswerFormat, type AnswerFormat } from './file.js';
 import { FAST_CHAIN, resolveChain, SMART_CHAIN, THINK_CHAIN, VOICE_CHAIN, type ChainInfo } from '../models.js';
 import {
@@ -227,7 +227,7 @@ const VOICE_PREFIX = switchWord('расшифруй|послушай');
 
 /**
  * Служебное слово-переключатель, в справке его нет: «/гем !resetuser @ник» —
- * обнулить человеку дневные нормы, все четыре разом.
+ * обнулить человеку дневные нормы, все семь разом.
  *
  * Нужно потому, что иначе сброс — это ssh на сервер, правка файла в контейнере
  * и обязательный рестарт: счётчик живёт в памяти процесса, а файл на диске
@@ -593,7 +593,7 @@ async function askChain(
     const history = takeHistory(ctx.session.history, config.ai.historySend);
 
     // Двухуровневый фолбэк (п.3 плана): для умных цепочек сначала спрашиваем
-    // OpenRouter (contrib→full), при отказе всей его цепочки — Gemini-хвост.
+    // OpenRouter (contrib→full→luna), при отказе всей его цепочки — Gemini-хвост.
     // Голосовая идёт только через Gemini: звук на OpenRouter не проверен.
     // Уровни собираются здесь, а не в models.ts: ChainInfo хранит один список,
     // а уровней два (провайдер+цепочка у каждого свои).
@@ -905,8 +905,9 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
         '<code>/гем !контекст почему этот SQL висит на большой таблице</code>\n' +
         '<code>/гем !контекст md разбор архитектуры бота</code> — ответ файлом\n\n' +
         'Форматы файла: <code>md</code>, <code>txt</code>, <code>html</code>. ' +
-        'Эти модели сильнее, но их дневная норма невелика — для обычных вопросов ' +
-        'хватает просто <code>/гем</code>.',
+        'Эти модели сильнее, но норма у них своя — ' +
+        `${config.contextQuota.perUserPerDay} подробных разборов в день на человека, ` +
+        'для обычных вопросов хватает просто <code>/гем</code>.',
       { parse_mode: 'HTML' },
     );
     return;
@@ -914,6 +915,21 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
 
   const gemini = await requireGemini(ctx);
   if (!gemini) return;
+
+  // У «!контекста» своя дневная норма (см. contextQuota): разборы длинные,
+  // общая бесплатная норма Gemini одна на всех, и без счёта один человек
+  // выбирал бы её в одиночку. Обычный «/гем» без нормы.
+  const contextUserId = ctx.from?.id;
+  const contextSlot = think ? await contextQuota.reserve(contextUserId) : null;
+  if (contextSlot && !contextSlot.allowed) {
+    await ctx.reply(
+      `🚫 На сегодня разборы закончились: ${contextSlot.limit} в день на человека.\n\n` +
+        `Норма обновится через ${contextSlot.resetsIn}. Обычные вопросы ` +
+        'работают как работали — они без нормы.',
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
 
   /**
    * Реплай на текстовое сообщение вместе со своим вопросом: «/гем как тебе
@@ -938,6 +954,9 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
     historyText: prompt,
     ...(think ? { answerLength: 'detailed' as const } : {}),
   });
+
+  // Ответить не вышло — слот нормы возвращаем: она про полученные разборы.
+  if (contextSlot && !answered) await contextQuota.release(contextUserId);
 
   // Запрос начался со слова-переключателя, но без «!». Отвечаем как на обычный
   // вопрос — человек, скорее всего, его и задавал, — но подсказываем синтаксис:
@@ -1464,10 +1483,10 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
 /**
  * Живой поиск: «/гем !сеть ...».
  *
- * Только Tavily: он отдаёт страницы, а ответ по ним пишет цепочка «Подумать»
- * (THINK_CHAIN) — та же, что у «!контекст». Денег это не стоит вовсе —
+ * Только Tavily: он отдаёт страницы, а ответ по ним пишет умная цепочка —
+ * та же, что отвечает на всё остальное. Денег это не стоит вовсе —
  * тратится кредит из пакета и бесплатная норма Google, а разбор пяти
- * найденных страниц как раз тот случай, где более сильная голова не лишняя.
+ * найденных страниц как раз тот случай, где голова помощнее не лишняя.
  *
  * Платный запасной путь через плагин OpenRouter (services/openrouter-web.ts)
  * пока отключён — модуль остался в коде, но handleWeb его не вызывает.
@@ -1528,7 +1547,7 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
 }
 
 /**
- * Страницы от Tavily, ответ пишет цепочка «Подумать».
+ * Страницы от Tavily, ответ пишет умная цепочка.
  *
  * Возвращает null, если ответить не вышло — ничего не нашлось или Gemini
  * не подключён; в обоих случаях сообщение об этом уже ушло пользователю.
@@ -1536,11 +1555,11 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
  * Глубина и число страниц — умолчания Tavily (basic, 1 кредит; 5 страниц):
  * раньше здесь стояли advanced и 8 страниц ради более точной выдачи, но
  * 31.08.2026 на боте это стабильно ловило таймаут первого прохода («выжимка
- * фактов» разбирает страницы той же головой, что и «подумать», — см.
- * NEWS_DIGEST_RULE) — 28КБ текста от 8 страниц не укладывались в 150с
- * у gemini-3.5-flash, а таймаут цепочка не перебирает (см. RETRYABLE
- * в chain.ts), так что запрос падал целиком. Меньше страниц — меньше веса
- * на входе первого прохода и меньше риск не уложиться.
+ * фактов» разбирает страницы той же умной головой — см. NEWS_DIGEST_RULE) —
+ * 28КБ текста от 8 страниц не укладывались в 150с у gemini-3.5-flash,
+ * а таймаут цепочка не перебирает (см. RETRYABLE в chain.ts), так что запрос
+ * падал целиком. Меньше страниц — меньше веса на входе первого прохода
+ * и меньше риск не уложиться.
  */
 async function searchWithTavily(ctx: BotContext, query: string): Promise<string | null> {
   const lookupProvider = findTextProvider(GEMINI_ID);
@@ -1565,7 +1584,7 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
 
   const chain = resolveChain(THINK_CHAIN);
   /**
-   * Порядок THINK_CHAIN хорош для «!контекст», но не для поиска — проверено
+   * Порядок ниже хорош для «!контекст», но не для поиска — проверено
    * вживую на боте 21.08.2026 тем же по весу запросом:
    *
    *  • gemini-3.7-flash (голова) то отказывал с 503 «high demand», то не
@@ -1581,6 +1600,10 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
    * доступный 3.5, а самый капризный 3.7 — почти в хвосте, но всё же
    * перед Gemma: она настоящая модель, а не запасной вариант «на всякий
    * случай», и заслуживает попытки раньше медленной страховки.
+   *
+   * THINK_CHAIN выше — алиас умной цепочки (см. models.ts): моделей и
+   * потолок берём у smart. Порядок держим как был: каких моделей в хвосте
+   * нет, те шаги пропускаются сами.
    */
   const special = ['gemini-3.5-flash', 'gemini-3.7-flash', 'gemma-4-31b-it'];
   const models = [
@@ -1600,7 +1623,7 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
   // OpenRouter-голова, потом тот же gemini-перепорядок — явные потолок
   // и таймаут действуют на оба уровня (см. generateWithFallback).
   const digest = await generateWithFallback(resolveSmartLevels(models, chain.maxOutputTokens), buildSearchPrompt(topic, pages), {
-    // Свой потолок токенов, отдельно от THINK_CHAIN (см. config.ai.webMaxOutputTokens) —
+    // Свой потолок токенов, отдельно от потолка умной цепочки (см. config.ai.webMaxOutputTokens) —
     // на входе много веса (страницы Tavily), обрыв на середине ответа обиднее лишнего запаса.
     maxOutputTokens: config.ai.webMaxOutputTokens,
     extraInstruction: NEWS_DIGEST_RULE,
@@ -1646,7 +1669,8 @@ function trimForSpeech(text: string, limit: number): { text: string; trimmed: bo
 /**
  * «/гем !resetuser …» — обнулить человеку дневные нормы. Только для админов.
  *
- * Сбрасываются все четыре разом (картинки, треки, поиск, размышления), и это
+ * Сбрасываются все семь разом (картинки, треки, поиск, размышления,
+ * разборы, озвучка, сообщения), и это
  * не лень: сбрасывают норму не «по бухгалтерии», а потому что человеку нужно
  * доделать начатое, и выяснять при этом, какая именно норма кончилась, —
  * лишний ход. Что было потрачено, бот в ответе покажет.
@@ -1712,18 +1736,18 @@ async function handleResetUser(ctx: BotContext, target: string): Promise<void> {
 
   await ctx.reply(
     spent.length > 0
-      ? `♻️ Нормы сброшены ${who}: было потрачено ${spent.join(', ')}. Все четыре снова полные.`
+      ? `♻️ Нормы сброшены ${who}: было потрачено ${spent.join(', ')}. Все семь снова полные.`
       : `♻️ Сбрасывать ${who} было нечего — сегодня ни одна норма не тронута.`,
   );
 }
 
 /**
- * «/гем !лимиты» — сколько осталось сегодня от всех четырёх дневных норм.
+ * «/гем !лимиты» — сколько осталось сегодня от всех шести дневных норм.
  *
- * Порядок — от самой щедрой нормы к самой строгой: поиск в интернете,
- * размышление, картинки, треки (см. src/config.ts). peek() ничего не тратит,
- * только подсматривает — этим и отличается от reserve() в остальных
- * обработчиках.
+ * Порядок — от самой щедрой нормы к самой строгой: подробные разборы,
+ * поиск в интернете, озвучка, размышление, картинки, треки (см. src/config.ts).
+ * peek() ничего не тратит, только подсматривает — этим и отличается
+ * от reserve() в остальных обработчиках.
  */
 async function handleLimits(ctx: BotContext): Promise<void> {
   const userId = ctx.from?.id;
@@ -1733,7 +1757,9 @@ async function handleLimits(ctx: BotContext): Promise<void> {
   }
 
   const items: Array<{ icon: string; label: string; quota: DailyQuota }> = [
+    { icon: '📚', label: 'Подробные разборы', quota: contextQuota },
     { icon: '🌐', label: 'Поиск в интернете', quota: webQuota },
+    { icon: '🔊', label: 'Озвучка', quota: ttsQuota },
     { icon: '🧠', label: 'Размышление', quota: deepQuota },
     { icon: '🎨', label: 'Картинки', quota: imageQuota },
     { icon: '🎵', label: 'Треки', quota: trackQuota },
@@ -1885,6 +1911,20 @@ async function handleSpeak(ctx: BotContext, request: string): Promise<void> {
   const plain = spoken.replace(/[*_`#>]/g, '').replace(/\[([^\]]+)]\([^)]+\)/g, '$1');
   const { text, trimmed } = trimForSpeech(plain.trim(), config.tts.maxChars);
 
+  // Норма — на готовую озвучку, а не на разбор просьбы выше: planSpeech идёт
+  // по бесплатному Gemini, а платится синтез. Поэтому занимаем слот здесь,
+  // а не в начале — как у треков (см. handleTrack).
+  const speakUserId = ctx.from?.id;
+  const speakQuota = await ttsQuota.reserve(speakUserId);
+  if (!speakQuota.allowed) {
+    await ctx.reply(
+      `🚫 На сегодня озвучки закончились: ${speakQuota.limit} в день на человека.\n\n` +
+        `Норма обновится через ${speakQuota.resetsIn}.`,
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
   try {
     const speech = await withChatAction(ctx, 'record_voice', () => synthesizeSpeech(text, voiceRequest));
 
@@ -1906,6 +1946,8 @@ async function handleSpeak(ctx: BotContext, request: string): Promise<void> {
       });
     }
   } catch (error) {
+    // Норма — про полученные озвучки, а не про попытки.
+    await ttsQuota.release(speakUserId);
     await replyWithError(ctx, error);
   }
 }

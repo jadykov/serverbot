@@ -125,7 +125,7 @@ export async function generateWithFallback(
   throw new ProviderNotConfiguredError(textProviders.map((provider) => provider.setupHint));
 }
 
-/** Уровни умной цепочки: OpenRouter (contrib→full) → Gemini. Пусто — только Gemini. */
+/** Уровни умной цепочки: OpenRouter (contrib→full→luna) → Gemini. Пусто — только Gemini. */
 export function resolveSmartLevels(fallbackModels: string[], fallbackMaxTokens: number): ChainLevel[] {
   const openai = findTextProvider('openai');
   const levels: ChainLevel[] = [];
@@ -144,7 +144,7 @@ export function resolveSmartLevels(fallbackModels: string[], fallbackMaxTokens: 
   return levels;
 }
 
-/** Уровни быстрой цепочки (JSON-планы): OpenRouter luna → Gemini light. */
+/** Уровни быстрой цепочки (JSON-планы): OpenRouter (contrib→luna) → Gemini fast. */
 export function resolveFastLevels(): ChainLevel[] {
   const openai = findTextProvider('openai');
   const levels: ChainLevel[] = [];
@@ -160,7 +160,7 @@ export function resolveFastLevels(): ChainLevel[] {
   if (gemini)
     levels.push({
       provider: gemini,
-      models: config.gemini.chains.light,
+      models: config.gemini.chains.fast,
       maxOutputTokens: config.gemini.maxOutput.main,
     });
   return levels;
