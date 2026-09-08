@@ -141,6 +141,8 @@ export function noteMessage(key: string, who: string, text: string): void {
   buffers.set(key, queue);
 
   if (queue.length >= config.digest.batchSize && !merging.has(key)) {
+    // Буфер стирается целиком: в слияние ушло всё накопленное, «жать ужатое»
+    // (повторно сжимать те же реплики) уже невозможно по построению.
     buffers.delete(key);
     void mergeDigest(key, queue);
   }

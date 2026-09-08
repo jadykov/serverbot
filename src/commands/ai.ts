@@ -9,8 +9,6 @@
  * Что умеет /гем, задаётся первым словом запроса, и слово это пишется
  * с восклицательным знаком:
  *   /гем <вопрос>             — обычный ответ умной цепочкой;
- *   /гем !контекст <задача>   — она же, но разбор подробный, потолок выше;
- *   /гем !контекст md|txt|html <задача> — она же, но ответ приходит файлом;
  *   /гем !нарисуй <описание>  — картинка вместо текста;
  *   /гем !скажи <текст>       — ответ голосом;
  *   /гем !трек <описание>     — песня с вокалом (платно);
@@ -48,11 +46,10 @@
 import { GrammyError, InputFile, type Bot } from 'grammy';
 import { config, isAdmin } from '../config.js';
 import { logger } from '../logger.js';
-import { findTextProvider, generateWithFallback, resolveFastLevels, resolveSmartLevels } from '../services/registry.js';
+import { findTextProvider, generateWithFallback, resolveFastLevels, resolveSmartLevels, resolveWebLevels } from '../services/registry.js';
 import { escapeHtml, markdownToTelegramHtml, MESSAGE_LIMIT, splitMarkdown } from '../format.js';
-import { sessionKey, today, withChatAction } from '../utils.js';
+import { sessionKey, today, trimHistoryByTokens, withChatAction } from '../utils.js';
 import { collectAlbumPart, downloadAttachment, pickPhotoFileId } from '../media.js';
-import { generateWithChain } from '../services/chain.js';
 import { startDraw } from './draw.js';
 import { listVoiceNames, parseVoiceRequest, planSpeech, synthesizeSpeech, type VoiceRequest } from '../services/gemini-tts.js';
 import { rememberMessage, searchMessages } from '../services/search-index.js';
@@ -68,12 +65,11 @@ import {
   isTavilyConfigured,
   searchTavily,
   TAVILY_SETUP_HINT,
-  type SearchOptions,
   type WebPage,
 } from '../services/tavily.js';
 import { DEEP_SETUP_HINT, deepThoughtBudget, isDeepThinkConfigured, thinkDeeply } from '../services/openrouter-think.js';
-import { contextQuota, deepQuota, imageQuota, resetEveryQuota, trackQuota, ttsQuota, webQuota, type DailyQuota } from '../services/daily-quota.js';
-import { handleFile, sendAnswerAsFile, takeAnswerFormat, type AnswerFormat } from './file.js';
+import { deepQuota, imageQuota, resetEveryQuota, trackQuota, ttsQuota, webQuota, type DailyQuota } from '../services/daily-quota.js';
+import { handleFile, sendAnswerAsFile, type AnswerFormat } from './file.js';
 import { FAST_CHAIN, resolveChain, SMART_CHAIN, THINK_CHAIN, VOICE_CHAIN, type ChainInfo } from '../models.js';
 import {
   ProviderNotConfiguredError,
@@ -97,7 +93,7 @@ const GEMINI_ID = 'gemini';
 const CYRILLIC_GEM = /^\/?гем(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/i;
 
 /**
- * Собирает регулярку слова-переключателя: «!контекст ...», «!нарисуй ...».
+ * Собирает регулярку слова-переключателя: «!нарисуй ...», «!сеть ...».
  *
  * Отдельными командами это не сделано намеренно. Точка входа к нейросети одна,
  * её и надо помнить; а меню Telegram не засоряется пунктами, которые
@@ -106,15 +102,13 @@ const CYRILLIC_GEM = /^\/?гем(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/i;
  * Восклицательный знак обязателен, и пробел после него допускается: «!нарисуй»
  * и «! нарисуй» — одно и то же. Разделитель после слова прописан явно,
  * а не через \b: в JavaScript граница слова определяется по латинице,
- * и с кириллицей \b просто не срабатывает — «!контекст чего-то» не совпало бы
- * вообще. Заодно такая запись не ловит «!контекстный» и «!нарисуйте»,
+ * и с кириллицей \b просто не срабатывает — «!нарисуй чего-то» не совпало бы
+ * вообще. Заодно такая запись не ловит «!сетевой» и «!нарисуйте»,
  * где слово лишь начинается похоже.
  */
 function switchWord(words: string): RegExp {
   return new RegExp(`^!\\s*(?:${words})(?:[\\s,:.—–-]+([\\s\\S]*))?$`, 'i');
 }
-
-const CONTEXT_PREFIX = switchWord('контекст');
 
 /**
  * Слово-переключатель: «/гем !нарисуй ...» —
@@ -183,7 +177,7 @@ const SEARCH_PREFIX = switchWord('найди|найти');
  * Сам поиск через Tavily идёт за бесплатные кредиты пакета (в бесплатном
  * их 1000, по одному за обычный поиск — см. src/services/tavily.ts),
  * а платная — модель, которая пишет ответ по найденным страницам
- * (OpenRouter-голова умной цепочки). Отсюда и дневная норма (см. handleWeb
+ * (web-уровни: голова-luna, хвост Gemini). Отсюда и дневная норма (см. handleWeb
  * ниже), и то, что «привет» не уходит искать в интернет.
  *
  * «Гугл» принят вторым написанием: слово в такой просьбе приходит в голову
@@ -192,18 +186,20 @@ const SEARCH_PREFIX = switchWord('найди|найти');
 const WEB_PREFIX = switchWord('сеть|интернет|гугл|погугли');
 
 /**
- * Слово-переключатель: «/гем !размышление ...» — один вопрос, много
- * думанья.
+ * Слово-переключатель: «/гем !размышление ...» (синоним — «!рассуждение») —
+ * один вопрос, много думанья.
  *
- * Не путать с «!контекстом», хотя оба про «подумай получше». «!контекст» —
- * это разбор внутри разговора: бесплатный Gemini, вся история раздела,
- * ответ по делу. Здесь наоборот: платная модель, которой дают время думать
- * перед ответом, и вопрос, нарочно оторванный от переписки — «голый».
+ * Здесь платная модель, которой дают время думать перед ответом, и вопрос,
+ * нарочно оторванный от переписки — «голый».
  *
  * Истории не передают вовсе, и это не экономия ради экономии: у такого
  * вопроса контекст только мешает — модель начинает отвечать разговору,
  * а не вопросу. То, что вход при этом дешевеет вдесятеро, приятный побочный
  * эффект (см. handleDeep).
+ *
+ * «Рассуждение» принято вторым написанием: слово в такой просьбе первым
+ * приходит в голову не реже, чем «размышление», а восклицательный знак
+ * не даёт спутать его с обычным вопросом.
  *
  * Слово прежде звалось «deepseek» — по модели, которая тогда думала.
  * Модель с тех пор сменилась на GPT-5.6 Luna, и имя, названное по чужому
@@ -211,7 +207,7 @@ const WEB_PREFIX = switchWord('сеть|интернет|гугл|погугли
  * что бот думает долго. Теперь слово говорит именно это, а модель осталась
  * тем, чем всегда была, — переменной в .env (DEEP_MODEL).
  */
-const DEEP_PREFIX = switchWord('размышление');
+const DEEP_PREFIX = switchWord('размышление|рассуждение');
 
 /**
  * Слово-переключатель: «/гем !расшифруй» реплаем на голосовое.
@@ -227,7 +223,7 @@ const VOICE_PREFIX = switchWord('расшифруй|послушай');
 
 /**
  * Служебное слово-переключатель, в справке его нет: «/гем !resetuser @ник» —
- * обнулить человеку дневные нормы, все семь разом.
+ * обнулить человеку дневные нормы, все шесть разом.
  *
  * Нужно потому, что иначе сброс — это ssh на сервер, правка файла в контейнере
  * и обязательный рестарт: счётчик живёт в памяти процесса, а файл на диске
@@ -248,10 +244,10 @@ const VOICE_PREFIX = switchWord('расшифруй|послушай');
 const RESET_PREFIX = switchWord('resetuser');
 
 /**
- * Служебное слово-переключатель: «/гем !лимиты» — сколько осталось сегодня
- * от всех четырёх дневных норм разом. Открыто всем, не только админу: это
- * не инструмент того, кто платит по счёту, а ответ на «а сколько у меня
- * осталось картинок», который иначе узнают только по факту отказа.
+ * «/гем !лимиты» — сколько осталось сегодня от всех пяти дневных норм.
+ * Открыто всем, не только админу: это не инструмент того, кто платит
+ * по счёту, а ответ на «а сколько у меня осталось картинок», который
+ * иначе узнают только по факту отказа.
  */
 const LIMITS_PREFIX = switchWord('лимиты');
 
@@ -268,7 +264,7 @@ const MEDIA_COMMAND = /^\/?(?:гем|gem)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$
  * а чтобы подсказать: человек, привыкший к прежнему синтаксису, иначе решит,
  * что рисование сломалось. Ответ на вопрос он при этом всё равно получит.
  */
-const FORGOTTEN_BANG = /^(?:нарисуй|контекст|скажи|найди|найти|расшифруй|послушай|трек|песня|сеть|интернет|гугл|погугли|размышление|файл|личка|лс|лимиты)(?:[\s,:.—–-]|$)/i;
+const FORGOTTEN_BANG = /^(?:нарисуй|скажи|найди|найти|расшифруй|послушай|трек|песня|сеть|интернет|гугл|погугли|размышление|рассуждение|файл|личка|лс|лимиты)(?:[\s,:.—–-]|$)/i;
 
 /**
  * Вопрос о самом боте: «что ты умеешь», «как тобой пользоваться» и подобное.
@@ -296,8 +292,7 @@ const META_QUESTION =
  *
  * Поэтому длину выбирает вопрос: «кто ты?» — одна строка, «почему падает
  * сборка» — сколько нужно, вплоть до целого сообщения. Потолок один
- * и прежний: сообщение Telegram. Кому нужен разбор длиннее, тот скажет
- * «!контекст» — там разворачиваются всегда, а не влезшее уезжает файлом.
+ * и прежний: сообщение Telegram. Не влезло — приедет файлом целиком.
  */
 const ONE_POST_RULE = [
   'Длину ответа выбирай по вопросу, а не по привычке.',
@@ -309,14 +304,15 @@ const ONE_POST_RULE = [
 ].join(' ');
 
 /**
- * Добавка к «!контексту»: здесь разворачиваться просят всегда.
+ * Добавка к подробному разбору: здесь разворачиваться просят всегда.
  *
- * За «!контекстом» идут не за репликой, а за разбором, и дневная норма
- * сильной цепочки невелика — около десяти запросов на человека. Потратить
- * такой запрос и получить три строки обидно вдвойне.
+ * Сейчас ничто её не использует (команда «!контекст», ради которой она
+ * появилась, удалена) — оставлена намеренно, пригодится «!размышлению»:
+ * удалять и писать заново тот же текст смысла нет.
  *
- * Про длину сообщения здесь не говорят вовсе, и это не упущение: не влезло —
- * приедет .md-файлом целиком, и это обычный исход, а не авария.
+ * За таким разбором идут не за репликой, а за разбором. Про длину сообщения
+ * здесь не говорят вовсе, и это не упущение: не влезло — приедет .md-файлом
+ * целиком, и это обычный исход, а не авария.
  */
 const THINK_RULE = [
   'Это разбор, а не реплика в чате: отвечай подробно и обстоятельно.',
@@ -328,7 +324,7 @@ const THINK_RULE = [
 ].join(' ');
 
 /**
- * Добавка к ответу, который уедет HTML-страницей («!контекст html ...»).
+ * Добавка к ответу, который уедет HTML-страницей.
  *
  * В чате таблица развалилась бы на строку палочек, и модель их справедливо
  * избегает. На странице всё наоборот: таблица показывается таблицей, а
@@ -449,7 +445,7 @@ async function sendMarkdown(ctx: BotContext, markdown: string): Promise<void> {
  * Отрезает от истории последние N сообщений для отправки в модель.
  *
  * Тонкость: диалог обязан начинаться с реплики пользователя. Реплики
- * складываются парами, но при нечётном HISTORY_LIMIT окно может начаться
+ * складываются парами, но при нечётном окне historySend оно может начаться
  * с ответа ассистента — модели семейства Gemma к такому порядку ролей
  * относятся строго и отвечают ошибкой. Лишнюю первую реплику отбрасываем.
  */
@@ -519,9 +515,10 @@ interface AskOptions {
    */
   historyText?: string;
   /**
-   * Отдать ответ файлом, а не сообщением: «/гем !контекст md ...».
-   * Тогда же берётся файловый потолок ответа — он ещё выше, чем у цепочки:
-   * файла просят как раз ради длинного разбора.
+   * Отдать ответ файлом, а не сообщением. Тогда же берётся файловый потолок
+   * ответа — он ещё выше, чем у цепочки: файла просят как раз ради длинного
+   * разбора. Сейчас этим путём идут только переросшие сообщение ответы
+   * (см. sendAnswer ниже): явного слова-файла для обычного ответа больше нет.
    */
   asFile?: AnswerFormat;
   /**
@@ -538,8 +535,8 @@ interface AskOptions {
  * `byNeed` — обычный вопрос в чат: длину выбирает вопрос, потолок — сообщение
  * (см. ONE_POST_RULE).
  *
- * `detailed` — «!контекст»: разворачиваться всегда, потолок сильной цепочки
- * (см. THINK_RULE).
+ * `detailed` — подробный разбор всегда (см. THINK_RULE). Сейчас не используется
+ * ни одной командой — оставлен про запас для «!размышления».
  *
  * `unbounded` — длину диктует сама задача, и договариваться о ней не о чем:
  * дословная расшифровка голосового, заказанный файл. Правила длины не передают
@@ -617,7 +614,7 @@ async function askChain(
       }),
     );
 
-    if (config.ai.historyLimit > 0) {
+    if (config.ai.historyMaxTokens > 0) {
       // В историю попадает только текст: картинки повторно не пересылаются,
       // иначе каждый следующий вопрос тащил бы за собой все прежние вложения.
       // Контекст при этом не теряется — что было на снимке, модель описала
@@ -638,8 +635,8 @@ async function askChain(
         rememberMessage(key, { ts: Date.now(), who: 'бот', text: answer.text });
         noteDigestMessage(key, 'бот', answer.text);
       }
-      // Держим в памяти только последние N сообщений.
-      ctx.session.history = ctx.session.history.slice(-config.ai.historyLimit);
+      // Держим в файле сессии только живой хвост по токенному капу.
+      ctx.session.history = trimHistoryByTokens(ctx.session.history, config.ai.historyMaxTokens);
     }
 
     if (asFile) {
@@ -690,10 +687,8 @@ function extractPrompt(ctx: BotContext, args: string): string {
 /**
  * Обработчик /гем и /gem.
  *
- * По умолчанию отвечает умная цепочка; если запрос начинается со слова
- * «!контекст», берётся она же, но с высоким потолком ответа и наказом
- * разворачиваться (см. THINK_RULE выше). Дневная норма у платных голов
- * небольшая, поэтому переключение всегда явное.
+ * По умолчанию отвечает умная цепочка. Переключение на другие умения —
+ * всегда явное, словом с восклицательным знаком.
  */
 async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   const trimmed = rawPrompt.trim();
@@ -705,7 +700,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
    *
    * Ветка забирает и пустой запрос («/гем» реплаем на фото — «что тут?»),
    * и любой вопрос про снимок. А вот «!нарисуй», «!скажи»,
-   * «!найди» и «!контекст» пропускает дальше: они про своё, и то, что рядом
+   * «!найди» пропускает дальше: они про своё, и то, что рядом
    * оказалась фотография, ничего в них не меняет.
    */
   // «!resetuser» — самой первой: она служебная, ни с чем не пересекается,
@@ -749,8 +744,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
     !SEARCH_PREFIX.test(trimmed) &&
     !WEB_PREFIX.test(trimmed) &&
     !TRACK_PREFIX.test(trimmed) &&
-    !DEEP_PREFIX.test(trimmed) &&
-    !CONTEXT_PREFIX.test(trimmed);
+    !DEEP_PREFIX.test(trimmed);
 
   if (repliedVoice && ownsVoice) {
     // «!расшифруй выпиши дословно» — слово съедаем, остаток остаётся вопросом.
@@ -794,8 +788,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
     !SEARCH_PREFIX.test(trimmed) &&
     !WEB_PREFIX.test(trimmed) &&
     !TRACK_PREFIX.test(trimmed) &&
-    !DEEP_PREFIX.test(trimmed) &&
-    !CONTEXT_PREFIX.test(trimmed);
+    !DEEP_PREFIX.test(trimmed);
 
   if (repliedPhoto && ownsPhoto) {
     await handleRepliedPhoto(ctx, repliedPhoto, rawPrompt);
@@ -807,7 +800,6 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
       'Напишите запрос после команды. Например:\n' +
         '<code>/гем объясни рекурсию за три предложения</code>\n\n' +
         'Слова с восклицательным знаком меняют поведение:\n' +
-        '<code>/гем !контекст почему этот SQL висит</code> — модель посильнее\n' +
         '<code>/гем !нарисуй кота-космонавта</code> — картинка вместо текста\n' +
         '<code>/гем !скажи привет</code> — ответ голосом\n' +
         '<code>/гем !трек песня про дедлайны</code> — песня с вокалом\n' +
@@ -882,54 +874,10 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
     return;
   }
 
-  const think = CONTEXT_PREFIX.exec(rawPrompt.trim());
-  const asked = think ? (think[1] ?? '').trim() : rawPrompt;
-
-  /**
-   * «!контекст md ...», «!контекст txt ...», «!контекст html ...» — тот же
-   * ответ, но файлом. Просят его ради длинных разборов: в чате такой ответ
-   * приезжает пачкой кусков по 4096 знаков, где ни прокрутить, ни сохранить.
-   *
-   * Отвечает модель как обычно, со всей историей раздела, а упаковкой
-   * занимаемся мы (см. sendAnswerAsFile в ./file.ts); для html к просьбе
-   * добавляется HTML_FILE_RULE — на странице таблица и график уместны.
-   * Тем и отличается от «!файл», где модель пишет сразу содержимое файла
-   * и никакого диалога вокруг нет.
-   */
-  const { format: fileFormat, rest } = think ? takeAnswerFormat(asked) : { format: undefined, rest: asked };
-  const prompt = fileFormat ? rest : asked;
-
-  if (think && !prompt) {
-    await ctx.reply(
-      (fileFormat ? `После «!контекст ${fileFormat}» нужна сама задача. Например:\n` : 'После «!контекст» нужна сама задача. Например:\n') +
-        '<code>/гем !контекст почему этот SQL висит на большой таблице</code>\n' +
-        '<code>/гем !контекст md разбор архитектуры бота</code> — ответ файлом\n\n' +
-        'Форматы файла: <code>md</code>, <code>txt</code>, <code>html</code>. ' +
-        'Эти модели сильнее, но норма у них своя — ' +
-        `${config.contextQuota.perUserPerDay} подробных разборов в день на человека, ` +
-        'для обычных вопросов хватает просто <code>/гем</code>.',
-      { parse_mode: 'HTML' },
-    );
-    return;
-  }
+  const prompt = rawPrompt;
 
   const gemini = await requireGemini(ctx);
   if (!gemini) return;
-
-  // У «!контекста» своя дневная норма (см. contextQuota): разборы длинные,
-  // общая бесплатная норма Gemini одна на всех, и без счёта один человек
-  // выбирал бы её в одиночку. Обычный «/гем» без нормы.
-  const contextUserId = ctx.from?.id;
-  const contextSlot = think ? await contextQuota.reserve(contextUserId) : null;
-  if (contextSlot && !contextSlot.allowed) {
-    await ctx.reply(
-      `🚫 На сегодня разборы закончились: ${contextSlot.limit} в день на человека.\n\n` +
-        `Норма обновится через ${contextSlot.resetsIn}. Обычные вопросы ` +
-        'работают как работали — они без нормы.',
-      { parse_mode: 'HTML' },
-    );
-    return;
-  }
 
   /**
    * Реплай на текстовое сообщение вместе со своим вопросом: «/гем как тебе
@@ -942,21 +890,13 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
    */
   const promptWithQuote = buildReplyQuotePrompt(ctx, prompt, ctx.message?.reply_to_message);
 
-  const chain = think ? resolveChain(THINK_CHAIN) : resolveChain(SMART_CHAIN);
-  // Формат назвали — файл будет в любом случае. Не назвали — ответ пойдёт
-  // в чат и станет файлом, только если не влезет в сообщение. Подробности
-  // просят у «!контекста» в обоих случаях: файл тут про доставку, а не
-  // про то, насколько обстоятельно разбирать.
+  const chain = resolveChain(SMART_CHAIN);
+  // Не влезло в сообщение — приедет файлом целиком (см. sendAnswer ниже).
   const answered = await askChain(ctx, gemini, chain, promptWithQuote, {
-    asFile: fileFormat,
     // В историю — чистый вопрос, без цитаты: та либо и так уже в истории
     // (если цитировали недавний ответ бота), либо разово нужна только модели.
     historyText: prompt,
-    ...(think ? { answerLength: 'detailed' as const } : {}),
   });
-
-  // Ответить не вышло — слот нормы возвращаем: она про полученные разборы.
-  if (contextSlot && !answered) await contextQuota.release(contextUserId);
 
   // Запрос начался со слова-переключателя, но без «!». Отвечаем как на обычный
   // вопрос — человек, скорее всего, его и задавал, — но подсказываем синтаксис:
@@ -1130,146 +1070,6 @@ function newsFinalRule(charBudget: number): string {
   ].join(' ');
 }
 
-/**
- * «!сеть» про новости конкретного города: «новости о Йошкар-Оле», «новости
- * в Казани», «казань новости» и т.п. — для таких запросов поиск точнее,
- * если рядом с городом явно указан его регион (округ, штат, республика…)
- * и включён настоящий фильтр Tavily по свежести — topic: 'news' + days.
- *
- * Раньше вместо этого в текст запроса подставлялась дата словами («новости
- * о городе Казань на 27–28 августа»), но это не фильтр, а просто ещё одни
- * слова в поисковой строке. На малолюдных городах это работало случайно —
- * свежего материала мало, и то, что Tavily находил, обычно и было свежим.
- * На крупных городах (Казань, Москва) объём материалов огромен, ранжирование
- * по релевантности вытаскивало страницы, вообще не датированные нужными
- * днями, — и первый проход честно отвечал «нет данных за эти два дня»,
- * хотя свежие новости в интернете были. Настоящий фильтр Tavily такую
- * путаницу не даёт: он отбирает по фактической дате публикации, а не
- * по совпадению слов.
- *
- * Регион по названию города не хранится словарём — городов в мире слишком
- * много, а держать актуальный список нереально. Вместо этого перед самим
- * поиском в Tavily идёт отдельный короткий вызов Gemini: не за поиском
- * (бесплатных ключей с поиском у Gemini нет, это забота Tavily), а просто
- * «в каком регионе город X» — по собственным знаниям модели, без инструментов.
- * Не про новости города — модель отвечает {"city":null}, и запрос уходит
- * в Tavily как есть, без единой правки. Так же — если распознать не вышло
- * (таймаут, не JSON, провайдер не настроен): деградация мягкая, ни на что,
- * кроме этого частного случая, не влияет.
- */
-const NEWS_WORD = /новост/i;
-
-/** Сколько дней назад разрешено искать новости города (Tavily-параметр days при topic: 'news'). */
-const CITY_NEWS_DAYS = 7;
-
-const CITY_NEWS_SYSTEM_PROMPT = [
-  'Ты определяешь, просит ли пользователь свежие новости именно про конкретный город',
-  '(а не про страну, компанию, персону, технологию, продукт и т.п.).',
-  'Если да — ответь строго одной строкой JSON без пояснений и без разметки кода:',
-  '{"city":"<город в именительном падеже, как правильно пишется по-русски>",',
-  '"region":"<регион, к которому относится город, короткой фразой с предлогом для вставки в текст,',
-  'например \'в республике Марий Эл\', \'в штате Техас\', \'в провинции Гуандун\';',
-  'если у города нет вышестоящего региона (город федерального значения вроде Москвы',
-  'или город-государство) — пустая строка \'\'>"}.',
-  'Если запрос не про новости конкретного города — ответь строго: {"city":null}.',
-  'Никакого другого текста в ответе быть не должно.',
-].join(' ');
-
-interface CityNewsLookup {
-  city: string;
-  region: string;
-}
-
-/** Разбирает ответ модели на попытку распознать город. null — не подошло или не распозналось. */
-function parseCityNewsLookup(raw: string): CityNewsLookup | null {
-  const match = raw.match(/\{[\s\S]*\}/);
-  if (!match) return null;
-
-  try {
-    const parsed: unknown = JSON.parse(match[0]);
-    if (typeof parsed !== 'object' || parsed === null) return null;
-
-    const { city, region } = parsed as { city?: unknown; region?: unknown };
-    if (typeof city !== 'string' || !city.trim()) return null;
-
-    return { city: city.trim(), region: typeof region === 'string' ? region.trim() : '' };
-  } catch {
-    return null;
-  }
-}
-
-/** Только буквы и цифры в нижнем регистре — для сравнения без падежей и дефисов. */
-function normalizeForMatch(text: string): string {
-  return text.toLowerCase().replace(/[^a-zа-яё0-9]/gi, '');
-}
-
-/**
- * Правда ли, что этот город реально упомянут в запросе, а не придуман моделью.
- * Падежные окончания («Казань» → «Казани») не совпадают буквально, поэтому
- * сравниваются не целиком, а по основе — без последних двух букв.
- */
-function cityMentionedInQuery(city: string, query: string): boolean {
-  const normalizedCity = normalizeForMatch(city);
-  if (!normalizedCity) return false;
-
-  const stem = normalizedCity.length > 5 ? normalizedCity.slice(0, -2) : normalizedCity;
-  return normalizeForMatch(query).includes(stem);
-}
-
-/** Результат разбора запроса на поиск: сам запрос и опции для Tavily поверх умолчаний. */
-interface ResolvedWebSearch {
-  query: string;
-  options: SearchOptions;
-}
-
-/**
- * Если запрос — про новости конкретного города, переписывает его в точную
- * форму «новости о городе X в <регионе>» и включает настоящий фильтр Tavily
- * по свежести (topic: 'news', days: CITY_NEWS_DAYS). Любой другой запрос
- * (в том числе непонятный) возвращает как есть, без дополнительных опций.
- */
-async function maybeRewriteCityNewsQuery(gemini: TextProvider, query: string): Promise<ResolvedWebSearch> {
-  if (!NEWS_WORD.test(query)) return { query, options: {} };
-
-  try {
-    const chain = resolveChain(SMART_CHAIN);
-    const { text } = await generateWithChain(gemini, chain.models, query, {
-      systemPrompt: CITY_NEWS_SYSTEM_PROMPT,
-      rawSystemPrompt: true,
-      maxOutputTokens: 200,
-      // 15с оказалось мало: на боте 25.08.2026 gemini-3.5-flash-lite ловила
-      // таймаут в половине запросов, и лукап тихо откатывался на поиск без
-      // региона и дат — при том, что сам вызов лёгкий и почти всегда быстрый.
-      timeoutMs: 25000,
-    });
-
-    const lookup = parseCityNewsLookup(text);
-    if (!lookup) return { query, options: {} };
-
-    // Подстраховка от галлюцинации: модель обязана называть только то, что
-    // реально написано в запросе, но если вдруг подставила город от себя —
-    // «новости о новых играх» не должны превращаться в новости условной Игры.
-    if (!cityMentionedInQuery(lookup.city, query)) {
-      logger.warn('Gemini назвал город, которого нет в запросе, — похоже на галлюцинацию, ищу как есть', {
-        query,
-        city: lookup.city,
-      });
-      return { query, options: {} };
-    }
-
-    const regionPart = lookup.region ? ` ${lookup.region}` : '';
-    return {
-      query: `новости о городе ${lookup.city}${regionPart}`,
-      options: { topic: 'news', days: CITY_NEWS_DAYS },
-    };
-  } catch (error) {
-    logger.warn('Не удалось распознать город для новостного поиска — ищу запрос как есть', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return { query, options: {} };
-  }
-}
-
 /** Складывает найденные страницы в запрос к модели. */
 function buildSearchPrompt(query: string, pages: WebPage[]): string {
   const found = pages
@@ -1288,7 +1088,7 @@ function sourcesBlock(links: string[]): string {
 /**
  * Доля от MESSAGE_LIMIT, которую должен занимать ответ «!сеть».
  *
- * Файлом такой ответ не уезжает никогда (в отличие от «!контекст»): смысл
+ * Файлом такой ответ не уезжает никогда: смысл
  * живого поиска — короткая свежая выжимка в чат, а не документ на почитать.
  * Поэтому вместо запасного пути файлом здесь верхняя граница держится
  * жёстко: если модель написала больше, текст обрезается по границе абзаца
@@ -1377,8 +1177,7 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
         '<code>/гем !размышление стоит ли доверять интуиции в спорах</code>\n\n' +
         'Вопрос уходит без истории раздела — это разговор с чистого листа, ' +
         'зато с настоящим размышлением перед ответом. ' +
-        `Платно: ${config.deepQuota.perUserPerDay} в день на человека. ` +
-        'Разбор внутри разговора — это <code>/гем !контекст …</code>, он бесплатный.',
+        `Платно: ${config.deepQuota.perUserPerDay} в день на человека. `,
       { parse_mode: 'HTML' },
     );
     return;
@@ -1390,7 +1189,7 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
   if (!quota.allowed) {
     await ctx.reply(
       `🚫 На сегодня размышления закончились: ${quota.limit} в день на человека.\n\n` +
-        `Норма обновится через ${quota.resetsIn}. Обычные вопросы и <code>!контекст</code> ` +
+        `Норма обновится через ${quota.resetsIn}. Обычные вопросы ` +
         'работают как работали — они бесплатны.',
       { parse_mode: 'HTML' },
     );
@@ -1483,8 +1282,8 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
 /**
  * Живой поиск: «/гем !сеть ...».
  *
- * Только Tavily: он отдаёт страницы, а ответ по ним пишет умная цепочка —
- * та же, что отвечает на всё остальное. Денег это не стоит вовсе —
+ * Только Tavily: он отдаёт страницы, а ответ по ним пишут web-уровни
+ * (L1 luna, L2 Gemini-хвост — см. resolveWebLevels). Денег это не стоит вовсе —
  * тратится кредит из пакета и бесплатная норма Google, а разбор пяти
  * найденных страниц как раз тот случай, где голова помощнее не лишняя.
  *
@@ -1533,11 +1332,11 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
       return;
     }
 
-    if (config.ai.historyLimit > 0) {
+    if (config.ai.historyMaxTokens > 0) {
       ctx.session.history.push({ role: 'user', text: query }, { role: 'assistant', text: answered });
       const key = sessionKey(ctx);
       if (key) rememberMessage(key, { ts: Date.now(), who: 'бот', text: answered });
-      ctx.session.history = ctx.session.history.slice(-config.ai.historyLimit);
+      ctx.session.history = trimHistoryByTokens(ctx.session.history, config.ai.historyMaxTokens);
     }
   } catch (error) {
     // Норма — про потраченное, а не про попытки: неудачный поиск слот вернёт.
@@ -1547,27 +1346,22 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
 }
 
 /**
- * Страницы от Tavily, ответ пишет умная цепочка.
+ * Страницы от Tavily, ответ пишут web-уровни: L1 luna, L2 Gemini-хвост.
  *
- * Возвращает null, если ответить не вышло — ничего не нашлось или Gemini
- * не подключён; в обоих случаях сообщение об этом уже ушло пользователю.
+ * Возвращает null, если ответить не вышло — ничего не нашлось или ни один
+ * текстовый провайдер не настроен; в обоих случаях сообщение об этом уже
+ * ушло пользователю.
  *
  * Глубина и число страниц — умолчания Tavily (basic, 1 кредит; 5 страниц):
  * раньше здесь стояли advanced и 8 страниц ради более точной выдачи, но
  * 31.08.2026 на боте это стабильно ловило таймаут первого прохода («выжимка
- * фактов» разбирает страницы той же умной головой — см. NEWS_DIGEST_RULE) —
- * 28КБ текста от 8 страниц не укладывались в 150с у gemini-3.5-flash,
- * а таймаут цепочка не перебирает (см. RETRYABLE в chain.ts), так что запрос
- * падал целиком. Меньше страниц — меньше веса на входе первого прохода
- * и меньше риск не уложиться.
+ * фактов» разбирает страницы — см. NEWS_DIGEST_RULE): 28КБ текста от 8 страниц
+ * не укладывались в 150с у gemini-3.5-flash, а таймаут цепочка не перебирает
+ * (см. RETRYABLE в chain.ts), так что запрос падал целиком. Меньше страниц —
+ * меньше веса на входе первого прохода и меньше риск не уложиться.
  */
 async function searchWithTavily(ctx: BotContext, query: string): Promise<string | null> {
-  const lookupProvider = findTextProvider(GEMINI_ID);
-  const resolved = lookupProvider?.isConfigured
-    ? await maybeRewriteCityNewsQuery(lookupProvider, query)
-    : { query, options: {} };
-
-  const pages = await searchTavily(resolved.query, resolved.options);
+  const pages = await searchTavily(query);
 
   if (pages.length === 0) {
     await ctx.reply(
@@ -1579,56 +1373,27 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
     return null;
   }
 
-  const gemini = await requireGemini(ctx);
-  if (!gemini) return null;
-
-  const chain = resolveChain(THINK_CHAIN);
-  /**
-   * Порядок ниже хорош для «!контекст», но не для поиска — проверено
-   * вживую на боте 21.08.2026 тем же по весу запросом:
-   *
-   *  • gemini-3.7-flash (голова) то отказывал с 503 «high demand», то не
-   *    укладывался даже в увеличенный таймаут 150с на весе поисковых
-   *    страниц. Таймаут цепочка не перебирает (см. RETRYABLE в chain.ts) —
-   *    первая же его неудача такого рода валила весь запрос, а не шла дальше.
-   *  • gemini-3.6-flash тоже словил 503 в том же тесте.
-   *  • gemini-3.5-flash ответил 200 за 13 секунд — из проверенных моделей
-   *    единственный, кто отработал с первого раза.
-   *
-   * Ни одну модель совсем не убираем — 3.6 и 3.7 иногда вполне отвечают,
-   * а резерв ничего не стоит. Просто для поиска первым идёт проверенно
-   * доступный 3.5, а самый капризный 3.7 — почти в хвосте, но всё же
-   * перед Gemma: она настоящая модель, а не запасной вариант «на всякий
-   * случай», и заслуживает попытки раньше медленной страховки.
-   *
-   * THINK_CHAIN выше — алиас умной цепочки (см. models.ts): моделей и
-   * потолок берём у smart. Порядок держим как был: каких моделей в хвосте
-   * нет, те шаги пропускаются сами.
-   */
-  const special = ['gemini-3.5-flash', 'gemini-3.7-flash', 'gemma-4-31b-it'];
-  const models = [
-    ...(chain.models.includes('gemini-3.5-flash') ? ['gemini-3.5-flash'] : []),
-    ...chain.models.filter((model) => !special.includes(model)),
-    ...(chain.models.includes('gemini-3.7-flash') ? ['gemini-3.7-flash'] : []),
-    ...(chain.models.includes('gemma-4-31b-it') ? ['gemma-4-31b-it'] : []),
-  ];
+  // Web-уровни (см. resolveWebLevels в services/registry.ts): L1 luna,
+  // L2 Gemini-хвост. Модели и потолок берём у main-хвоста как запасной список.
+  const levels = resolveWebLevels(config.gemini.chains.main);
+  if (levels.length === 0) {
+    await ctx.reply('🔌 Живой поиск не подключён: нет ни OpenRouter-ключа, ни Gemini-ключа.');
+    return null;
+  }
 
   // Реплай на сообщение (в т.ч. на ответ самого бота) подмешивается только
-  // в промпты модели ниже — не в resolved.query выше, тому нужны чистые
+  // в промпты модели ниже — не в query выше, тому нужны чистые
   // ключевые слова для Tavily, а не цитата с обвязкой.
-  const topic = buildReplyQuotePrompt(ctx, resolved.query, ctx.message?.reply_to_message);
+  const topic = buildReplyQuotePrompt(ctx, query, ctx.message?.reply_to_message);
 
   // Первый проход: чистая фактическая выжимка по найденным страницам,
-  // без своих рассуждений (см. NEWS_DIGEST_RULE). Уровни умные: сначала
-  // OpenRouter-голова, потом тот же gemini-перепорядок — явные потолок
-  // и таймаут действуют на оба уровня (см. generateWithFallback).
-  const digest = await generateWithFallback(resolveSmartLevels(models, chain.maxOutputTokens), buildSearchPrompt(topic, pages), {
-    // Свой потолок токенов, отдельно от потолка умной цепочки (см. config.ai.webMaxOutputTokens) —
-    // на входе много веса (страницы Tavily), обрыв на середине ответа обиднее лишнего запаса.
-    maxOutputTokens: config.ai.webMaxOutputTokens,
+  // без своих рассуждений (см. NEWS_DIGEST_RULE). Вход — ~8000 токенов
+  // (5 страниц по 4000 знаков), отсюда и потолок 4000: выжимке нужно место
+  // развернуться, а резать её — терять факты.
+  const digest = await generateWithFallback(levels, buildSearchPrompt(topic, pages), {
+    maxOutputTokens: config.ai.webDigestMaxOutputTokens,
     extraInstruction: NEWS_DIGEST_RULE,
-    // Свой, более щедрый таймаут: см. config.ai.webTimeoutMs — запрос сюда
-    // тяжелее обычного, общих 90 секунд голове цепочки не всегда хватает.
+    // Свой таймаут: см. config.ai.webTimeoutMs — запрос сюда тяжелее обычного.
     timeoutMs: config.ai.webTimeoutMs,
   });
 
@@ -1637,10 +1402,11 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
   // не в MESSAGE_LIMIT целиком, а в то, что от него реально останется тексту.
   const charBudget = Math.floor(MESSAGE_LIMIT * NEWS_LENGTH_MAX_RATIO) - sourcesBlock(links).length;
 
-  // Второй проход: финальный ответ по выжимке, дополненный пониманием —
-  // в этом смысл живого поиска (см. newsFinalRule).
-  const answer = await generateWithFallback(resolveSmartLevels(models, chain.maxOutputTokens), buildNewsFinalPrompt(topic, digest.text), {
-    maxOutputTokens: config.ai.webMaxOutputTokens,
+  // Второй проход: финальный ответ по выжимке, дополненный пониманием, —
+  // в этом смысл живого поиска (см. newsFinalRule). Потолок — одно сообщение
+  // Telegram минус запас (WEB_FINAL_MAX_OUTPUT_TOKENS).
+  const answer = await generateWithFallback(levels, buildNewsFinalPrompt(topic, digest.text), {
+    maxOutputTokens: config.ai.webFinalMaxOutputTokens,
     extraInstruction: newsFinalRule(Math.max(charBudget, 0)),
     timeoutMs: config.ai.webTimeoutMs,
   });
@@ -1669,8 +1435,8 @@ function trimForSpeech(text: string, limit: number): { text: string; trimmed: bo
 /**
  * «/гем !resetuser …» — обнулить человеку дневные нормы. Только для админов.
  *
- * Сбрасываются все семь разом (картинки, треки, поиск, размышления,
- * разборы, озвучка, сообщения), и это
+ * Сбрасываются все шесть разом (картинки, треки, поиск, размышления,
+ * озвучка, сообщения), и это
  * не лень: сбрасывают норму не «по бухгалтерии», а потому что человеку нужно
  * доделать начатое, и выяснять при этом, какая именно норма кончилась, —
  * лишний ход. Что было потрачено, бот в ответе покажет.
@@ -1736,16 +1502,16 @@ async function handleResetUser(ctx: BotContext, target: string): Promise<void> {
 
   await ctx.reply(
     spent.length > 0
-      ? `♻️ Нормы сброшены ${who}: было потрачено ${spent.join(', ')}. Все семь снова полные.`
+      ? `♻️ Нормы сброшены ${who}: было потрачено ${spent.join(', ')}. Все шесть снова полные.`
       : `♻️ Сбрасывать ${who} было нечего — сегодня ни одна норма не тронута.`,
   );
 }
 
 /**
- * «/гем !лимиты» — сколько осталось сегодня от всех шести дневных норм.
+ * «/гем !лимиты» — сколько осталось сегодня от показанных дневных норм.
  *
- * Порядок — от самой щедрой нормы к самой строгой: подробные разборы,
- * поиск в интернете, озвучка, размышление, картинки, треки (см. src/config.ts).
+ * Порядок — от самой щедрой нормы к самой строгой: поиск в интернете,
+ * озвучка, размышление, картинки, треки (см. src/config.ts).
  * peek() ничего не тратит, только подсматривает — этим и отличается
  * от reserve() в остальных обработчиках.
  */
@@ -1757,7 +1523,6 @@ async function handleLimits(ctx: BotContext): Promise<void> {
   }
 
   const items: Array<{ icon: string; label: string; quota: DailyQuota }> = [
-    { icon: '📚', label: 'Подробные разборы', quota: contextQuota },
     { icon: '🌐', label: 'Поиск в интернете', quota: webQuota },
     { icon: '🔊', label: 'Озвучка', quota: ttsQuota },
     { icon: '🧠', label: 'Размышление', quota: deepQuota },
@@ -2372,6 +2137,7 @@ async function handlePhotos(ctx: BotContext, fileIds: string[], caption: string)
   }
 }
 
+// ВНИМАНИЕ-ловушка: registerAiCommands ставит терминальный bot.on('message:text') (без next()). Любой bot.command/hears/on('message:text'), зарегистрированный ПОСЛЕ него, недостижим — grammy идёт по middleware по порядку. Новые команды — только ДО registerAiCommands либо с next().
 export function registerAiCommands(bot: Bot<BotContext>): void {
   // ------------------------------------------------------- /gem и /гем
   bot.command('gem', async (ctx, next) => {

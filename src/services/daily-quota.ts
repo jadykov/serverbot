@@ -7,10 +7,9 @@
  * человек за вечер тратит бюджет всей группы.
  *
  * Норм шесть, и они независимы: картинки, треки, живой поиск, размышление,
- * подробные разборы («!контекст») и озвучка («!скажи») считаются отдельно —
+ * озвучка («!скажи») и обычные сообщения считаются отдельно —
  * общий счётчик врал бы всем сразу. Логика у них при этом одна до буквы —
  * поэтому здесь фабрика, а не шесть похожих модулей.
- * а не четыре похожих модуля.
  *
  * Счётчик лежит на диске рядом с сессиями, а не в памяти процесса: иначе
  * любой рестарт или деплой молча обнулял бы норму всем сразу, и лимит
@@ -271,14 +270,6 @@ export const deepQuota = createDailyQuota({
   timezone: () => config.deepQuota.timezone,
 });
 
-/** Норма на подробные разборы («!контекст»): бесплатный Gemini, но общая дневная норма у него одна на всех. */
-export const contextQuota = createDailyQuota({
-  file: 'context-quota.json',
-  what: 'подробных разборов',
-  limit: () => config.contextQuota.perUserPerDay,
-  timezone: () => config.contextQuota.timezone,
-});
-
 /** Норма на озвучку («!скажи»): у TTS-моделей общая норма маленькая, эта — личная. */
 export const ttsQuota = createDailyQuota({
   file: 'tts-quota.json',
@@ -307,7 +298,6 @@ export const everyQuota: ReadonlyArray<{ what: string; quota: DailyQuota }> = [
   { what: 'треки', quota: trackQuota },
   { what: 'поиск', quota: webQuota },
   { what: 'размышления', quota: deepQuota },
-  { what: 'подробные разборы', quota: contextQuota },
   { what: 'озвучка', quota: ttsQuota },
   { what: 'сообщения', quota: messagesQuota },
 ];

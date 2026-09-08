@@ -42,6 +42,7 @@ import { getDigest, noteMessage as noteDigestMessage } from './digest.js';
 import { rememberMessage, recentMessages, type IndexedMessage } from './search-index.js';
 import { knownTopics } from './topics.js';
 import { markdownToTelegramHtml, splitMarkdown } from '../format.js';
+import { trimHistoryByTokens } from '../utils.js';
 import type { BotContext, SessionData } from '../types.js';
 
 /** Своё хранилище сессий: читаем и правим их напрямую, без апдейта от Telegram. */
@@ -149,9 +150,9 @@ async function sendSpontaneous(bot: Bot<BotContext>, chatId: number, threadId: n
   }
 }
 
-/** Дописывает реплику бота в историю раздела — тем же способом и с тем же потолком, что и обычный ответ. */
+/** Дописывает реплику бота в историю раздела — тем же способом и с тем же капом, что и обычный ответ. */
 async function appendToHistory(key: string, text: string): Promise<void> {
-  if (config.ai.historyLimit <= 0) return;
+  if (config.ai.historyMaxTokens <= 0) return;
 
   // Гонка с обычным ответом в этот же момент теоретически возможна (оба читают
   // и пишут сессию напрямую, без общей блокировки), но при случайном времени
@@ -161,7 +162,7 @@ async function appendToHistory(key: string, text: string): Promise<void> {
   if (!data) return;
 
   data.history.push({ role: 'assistant', text });
-  data.history = data.history.slice(-config.ai.historyLimit);
+  data.history = trimHistoryByTokens(data.history, config.ai.historyMaxTokens);
   await sessions.write(key, data);
 }
 

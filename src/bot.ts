@@ -15,7 +15,6 @@ import { rateLimit } from './middlewares/rateLimit.js';
 import { mute } from './middlewares/mute.js';
 import { searchIndexer } from './middlewares/searchIndex.js';
 import { digestCollector } from './middlewares/digest.js';
-import { topicsCollector } from './middlewares/topics.js';
 import { userDirectory } from './middlewares/directory.js';
 import { registerBasicCommands } from './commands/basic.js';
 import { registerAiCommands } from './commands/ai.js';
@@ -31,7 +30,7 @@ export const BOT_COMMANDS = [
   { command: 'stop', description: 'Замолчать в этом разделе (обратно — /start)' },
   // Кириллическую /гем в это меню добавить нельзя: Telegram принимает
   // в именах команд только латиницу (иначе BOT_COMMAND_INVALID).
-  { command: 'gem', description: 'То же, что /гем. Слова: !контекст !сеть !нарисуй !скажи !трек !найди !файл' },
+  { command: 'gem', description: 'То же, что /гем. Слова: !сеть !нарисуй !скажи !трек !найди !файл' },
   { command: 'ping', description: 'Проверить связь и задержку' },
   { command: 'marco', description: 'Тест: бот ответит Polo!' },
   { command: 'test', description: 'Самодиагностика бота' },
@@ -52,11 +51,6 @@ export function createBot(): Bot<BotContext> {
   // 3. Справочник «@ник → id». До сессии и до выключателя: знание о том, кто
   //    есть в чате, не зависит ни от раздела, ни от того, включён ли в нём бот.
   bot.use(userDirectory);
-
-  // 3.5. Список разделов, где бот бывал — для спонтанных реплик (см.
-  //      src/services/spontaneous.ts). Тоже до выключателя: раздел, временно
-  //      замолчавший через /stop, не должен из этого списка пропадать.
-  bot.use(topicsCollector);
 
   // 4. Сессия. Лежит в файлах на диске, а не в памяти процесса: в ней история
   //    диалога каждого топика. Держи мы её в памяти, любой деплой молча
@@ -104,6 +98,7 @@ export function createBot(): Bot<BotContext> {
   //    для обычных сообщений, и она должна получать управление после всех.
   //    registerDrawCommands стоит перед ней по той же причине: правка промпта
   //    приходит обычным сообщением, и перехватить его надо раньше ловушки.
+  // ВНИМАНИЕ-ловушка: registerAiCommands ставит терминальный bot.on('message:text') (без next()). Любой bot.command/hears/on('message:text'), зарегистрированный ПОСЛЕ него, недостижим — grammy идёт по middleware по порядку. Новые команды — только ДО registerAiCommands либо с next().
   registerBasicCommands(bot);
   registerDrawCommands(bot);
   registerAiCommands(bot);

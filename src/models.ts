@@ -6,8 +6,8 @@
  * она отказала. Так лимиты перестают быть проблемой без всякого учёта квот:
  * дневная норма первой модели кончилась — запрос молча уходит следующей.
  *
- * Содержательная цепочка одна — умная: обычный разговор, «!контекст»,
- * «!сеть», «!файл» и присланные документы идут ею же. Отдельной сильной
+ * Содержательная цепочка одна — умная: обычный разговор, «!сеть»,
+ * «!файл» и присланные документы идут ею же. Отдельной сильной
  * цепочки «Подумать» больше нет: владелец признал её полным дублем умной,
  * и THINK_CHAIN остался лишь алиасом smart для старых сессий (см. ниже).
  * Поиск разбирает найденные страницы той же умной головой — короткая
@@ -33,7 +33,8 @@
  *
  * Первые уровни обеих двухуровневых цепочек живут на OpenRouter (см.
  * config.openai.chains и resolveSmartLevels/resolveFastLevels в registry.ts):
- * smart — contrib → full → luna, fast — contrib → luna. За ними —
+ * smart — contrib → full → luna, fast — середина luna → contrib (точный плоский
+ * порядок владельца: lite-голова → luna → contrib → Gemma-хвост). За ними —
  * Gemini-хвосты из config.gemini.chains.
  *
  * Сами имена моделей лежат в конфигурации и правятся через .env —
@@ -53,12 +54,13 @@ export const VOICE_CHAIN = 'voice';
 /**
  * Умная и быстрая цепочки (п.3 плана: OpenRouter pay-as-you-go + Gemini-хвост).
  *
- * smart — всё содержательное: разговор, картинки, документы, «!контекст»,
+ * smart — всё содержательное: разговор, картинки, документы,
  * «!сеть», «!файл». Первый уровень `OPENAI_CHAIN_SMART` (contrib→full→luna),
  * второй — Gemini main-хвост. Замер contrib-про-пустоту и пол 4000
  * в registry.ts сохранены: потолок smart не опускать ниже 4000.
- * fast — формальные JSON-планы (рисование, !скажи, !трек): первый уровень
- * `OPENAI_CHAIN_FAST` (contrib→luna), второй — отдельный Gemini fast-хвост
+ * fast — формальные JSON-планы (рисование, !скажи, !трек): три уровня
+ * (L1 Gemini lite-голова → L2 OpenRouter luna→contrib → L3 Gemma-хвост,
+ * см. resolveFastLevels), второй — отдельный Gemini fast-хвост
  * (GEMINI_CHAIN_FAST, не LIGHT).
  *
  * voice остаётся чисто на Gemini: звук через OpenRouter не проверен
@@ -89,7 +91,7 @@ export function listChains(): ChainInfo[] {
     {
       id: SMART_CHAIN,
       title: 'Умный',
-      hint: 'Разговор, вопросы, картинки, документы, !контекст, !сеть. Голова — OpenRouter, запас — Gemini.',
+      hint: 'Разговор, вопросы, картинки, документы, !сеть. Голова — OpenRouter, запас — Gemini.',
       // Второй уровень (Gemini-хвост); первый (OpenRouter) берётся из
       // config.openai.chains.smart в generateWithFallback (см. registry.ts).
       models: config.gemini.chains.main,
@@ -98,7 +100,7 @@ export function listChains(): ChainInfo[] {
     {
       id: FAST_CHAIN,
       title: 'Быстрый',
-      hint: 'Служебные планы (рисование, озвучка, треки). Голова — OpenRouter (contrib→luna), запас — Gemini fast.',
+      hint: 'Служебные планы (рисование, озвучка, треки). Уровни: lite-голова, OpenRouter (luna→contrib), Gemma-хвост.',
       models: config.gemini.chains.fast,
       maxOutputTokens: config.gemini.maxOutput.main,
     },

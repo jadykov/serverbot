@@ -2,7 +2,7 @@
  * Мелкие утилиты, которые нужны в нескольких местах проекта.
  */
 import { config } from './config.js';
-import type { BotContext } from './types.js';
+import type { BotContext, ChatMessage } from './types.js';
 
 /**
  * Контекст без самой сессии: именно такой grammY передаёт в getSessionKey —
@@ -33,7 +33,6 @@ export function sessionKey(ctx: SessionlessContext): string | undefined {
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
 /**
  * Ограничивает время выполнения промиса.
  * Нужно, потому что зависший запрос к нейросети иначе будет держать
@@ -65,6 +64,27 @@ export function formatDuration(ms: number): string {
   if (minutes > 0) parts.push(`${minutes} мин`);
   if (seconds > 0 || parts.length === 0) parts.push(`${seconds} с`);
   return parts.join(' ');
+}
+
+/**
+ * Режет историю с конца по токенному капу (HISTORY_MAX_TOKENS).
+ *
+ * Подсчёт грубый — знаки/2,5 (кириллица), тот же делитель, что у MESSAGE_LIMIT
+ * в format.ts. Режем целыми репликами с начала: пары «вопрос-ответ» при этом
+ * могут рваться (хвост начинается с ответа бота) — это осознанно, модели такой
+ * порядок переваривают, а резать ответы бота вовсе (терять половину пользы
+ * раздела) хуже. В модель история всё равно уходит через takeHistory.
+ */
+export function trimHistoryByTokens(history: ChatMessage[], maxTokens: number): ChatMessage[] {
+  if (maxTokens <= 0) return [];
+  let total = 0;
+  let start = history.length;
+  for (let index = history.length - 1; index >= 0; index--) {
+    total += Math.ceil((history[index]?.text.length ?? 0) / 2.5);
+    if (total > maxTokens) break;
+    start = index;
+  }
+  return history.slice(start);
 }
 
 /**
