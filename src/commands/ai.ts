@@ -48,7 +48,7 @@
 import { GrammyError, InputFile, type Bot } from 'grammy';
 import { config, isAdmin } from '../config.js';
 import { logger } from '../logger.js';
-import { findTextProvider } from '../services/registry.js';
+import { findTextProvider, generateWithFallback, resolveFastLevels, resolveSmartLevels } from '../services/registry.js';
 import { escapeHtml, markdownToTelegramHtml, MESSAGE_LIMIT, splitMarkdown } from '../format.js';
 import { sessionKey, today, withChatAction } from '../utils.js';
 import { collectAlbumPart, downloadAttachment, pickPhotoFileId } from '../media.js';
@@ -74,7 +74,7 @@ import {
 import { DEEP_SETUP_HINT, deepThoughtBudget, isDeepThinkConfigured, thinkDeeply } from '../services/openrouter-think.js';
 import { deepQuota, imageQuota, resetEveryQuota, trackQuota, webQuota, type DailyQuota } from '../services/daily-quota.js';
 import { handleFile, sendAnswerAsFile, takeAnswerFormat, type AnswerFormat } from './file.js';
-import { MAIN_CHAIN, resolveChain, THINK_CHAIN, VOICE_CHAIN, type ChainInfo } from '../models.js';
+import { FAST_CHAIN, resolveChain, SMART_CHAIN, THINK_CHAIN, VOICE_CHAIN, type ChainInfo } from '../models.js';
 import {
   ProviderNotConfiguredError,
   ProviderRequestError,
@@ -592,15 +592,27 @@ async function askChain(
     // (см. config.ai.historySend).
     const history = takeHistory(ctx.session.history, config.ai.historySend);
 
+    // Двухуровневый фолбэк (п.3 плана): для умных цепочек сначала спрашиваем
+    // OpenRouter (contrib→full), при отказе всей его цепочки — Gemini-хвост.
+    // Голосовая идёт только через Gemini: звук на OpenRouter не проверен.
+    // Уровни собираются здесь, а не в models.ts: ChainInfo хранит один список,
+    // а уровней два (провайдер+цепочка у каждого свои).
+    const levels =
+      chain.id === FAST_CHAIN
+        ? resolveFastLevels()
+        : chain.id === VOICE_CHAIN
+          ? [{ provider, models: chain.models, maxOutputTokens: chain.maxOutputTokens }]
+          : resolveSmartLevels(chain.models, chain.maxOutputTokens);
     // Пока модель думает, показываем «печатает…».
     const answer = await withChatAction(ctx, asFile ? 'upload_document' : 'typing', () =>
-      generateWithChain(provider, chain.models, prompt, {
+      generateWithFallback(levels, prompt, {
         history,
         attachments,
         // Потолок ответа: у цепочки свой (он упирается в минутную норму
         // её моделей), файловый ещё выше — его берут там, где длину задаёт
-        // задача, а не размер сообщения.
-        maxOutputTokens: asFile || length === 'unbounded' ? config.files.answerMaxOutputTokens : chain.maxOutputTokens,
+        // задача, а не размер сообщения. Явный потолок сильнее уровневых
+        // (см. generateWithFallback): файл одинаково огромен на обоих уровнях.
+        ...(asFile || length === 'unbounded' ? { maxOutputTokens: config.files.answerMaxOutputTokens } : {}),
         ...(rules.length > 0 ? { extraInstruction: rules.join(' ') } : {}),
       }),
     );
@@ -914,7 +926,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
    */
   const promptWithQuote = buildReplyQuotePrompt(ctx, prompt, ctx.message?.reply_to_message);
 
-  const chain = think ? resolveChain(THINK_CHAIN) : resolveChain(MAIN_CHAIN);
+  const chain = think ? resolveChain(THINK_CHAIN) : resolveChain(SMART_CHAIN);
   // Формат назвали — файл будет в любом случае. Не назвали — ответ пойдёт
   // в чат и станет файлом, только если не влезет в сообщение. Подробности
   // просят у «!контекста» в обоих случаях: файл тут про доставку, а не
@@ -1201,7 +1213,7 @@ async function maybeRewriteCityNewsQuery(gemini: TextProvider, query: string): P
   if (!NEWS_WORD.test(query)) return { query, options: {} };
 
   try {
-    const chain = resolveChain(MAIN_CHAIN);
+    const chain = resolveChain(SMART_CHAIN);
     const { text } = await generateWithChain(gemini, chain.models, query, {
       systemPrompt: CITY_NEWS_SYSTEM_PROMPT,
       rawSystemPrompt: true,
@@ -1584,8 +1596,10 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
   const topic = buildReplyQuotePrompt(ctx, resolved.query, ctx.message?.reply_to_message);
 
   // Первый проход: чистая фактическая выжимка по найденным страницам,
-  // без своих рассуждений (см. NEWS_DIGEST_RULE).
-  const digest = await generateWithChain(gemini, models, buildSearchPrompt(topic, pages), {
+  // без своих рассуждений (см. NEWS_DIGEST_RULE). Уровни умные: сначала
+  // OpenRouter-голова, потом тот же gemini-перепорядок — явные потолок
+  // и таймаут действуют на оба уровня (см. generateWithFallback).
+  const digest = await generateWithFallback(resolveSmartLevels(models, chain.maxOutputTokens), buildSearchPrompt(topic, pages), {
     // Свой потолок токенов, отдельно от THINK_CHAIN (см. config.ai.webMaxOutputTokens) —
     // на входе много веса (страницы Tavily), обрыв на середине ответа обиднее лишнего запаса.
     maxOutputTokens: config.ai.webMaxOutputTokens,
@@ -1602,7 +1616,7 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
 
   // Второй проход: финальный ответ по выжимке, дополненный пониманием —
   // в этом смысл живого поиска (см. newsFinalRule).
-  const answer = await generateWithChain(gemini, models, buildNewsFinalPrompt(topic, digest.text), {
+  const answer = await generateWithFallback(resolveSmartLevels(models, chain.maxOutputTokens), buildNewsFinalPrompt(topic, digest.text), {
     maxOutputTokens: config.ai.webMaxOutputTokens,
     extraInstruction: newsFinalRule(Math.max(charBudget, 0)),
     timeoutMs: config.ai.webTimeoutMs,
@@ -1856,11 +1870,9 @@ async function handleSpeak(ctx: BotContext, request: string): Promise<void> {
   // помощнику, что именно есть под рукой. planSpeech сам решит, что из
   // asked — направление, а что, если вообще есть, — текст поверх контекста.
   if (!spec && asked) {
-    const helper = findTextProvider(GEMINI_ID);
-    if (helper?.isConfigured) {
-      const plan = await withChatAction(ctx, 'typing', () =>
-        planSpeech(helper, config.gemini.chains.light, asked, quoted || undefined),
-      );
+    const levels = resolveFastLevels();
+    if (levels.length > 0) {
+      const plan = await withChatAction(ctx, 'typing', () => planSpeech(levels, asked, quoted || undefined));
       spoken = plan.text;
       if (plan.direction) {
         voiceRequest = parseVoiceRequest(plan.direction);
@@ -1965,7 +1977,7 @@ async function handleTrack(ctx: BotContext, request: string): Promise<void> {
   const situation = (replyTo?.text ?? replyTo?.caption ?? '').trim() || undefined;
 
   // Шаг бесплатный: стиль по-английски, слова песни и длительность.
-  const plan = await withChatAction(ctx, 'typing', () => planSong(gemini, config.gemini.chains.light, request, situation));
+  const plan = await withChatAction(ctx, 'typing', () => planSong(resolveFastLevels(), request, situation));
 
   if (!plan) {
     await ctx.reply(
@@ -2122,7 +2134,7 @@ async function handleRepliedPhoto(ctx: BotContext, fileId: string, rawPrompt: st
     const image = await withChatAction(ctx, 'typing', () => downloadAttachment(ctx, fileId));
 
     const prompt = rawPrompt.trim() || DEFAULT_IMAGE_PROMPT;
-    await askChain(ctx, gemini, resolveChain(MAIN_CHAIN), prompt, { attachments: [image] });
+    await askChain(ctx, gemini, resolveChain(SMART_CHAIN), prompt, { attachments: [image] });
   } catch (error) {
     await replyWithError(ctx, error);
   }
@@ -2174,7 +2186,7 @@ async function handleReplyToBot(ctx: BotContext, text: string, repliedMessage: Q
 
   const prompt = buildReplyQuotePrompt(ctx, text, repliedMessage, 'ответ');
 
-  await askChain(ctx, gemini, resolveChain(MAIN_CHAIN), prompt, { historyText: text });
+  await askChain(ctx, gemini, resolveChain(SMART_CHAIN), prompt, { historyText: text });
 }
 
 /**
@@ -2312,7 +2324,7 @@ async function handlePhotos(ctx: BotContext, fileIds: string[], caption: string)
       Promise.all(fileIds.map((fileId) => downloadAttachment(ctx, fileId))),
     );
 
-    await askChain(ctx, gemini, resolveChain(MAIN_CHAIN), request.prompt, { attachments });
+    await askChain(ctx, gemini, resolveChain(SMART_CHAIN), request.prompt, { attachments });
   } catch (error) {
     await replyWithError(ctx, error);
   }

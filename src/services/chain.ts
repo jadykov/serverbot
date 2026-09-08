@@ -22,8 +22,8 @@ import {
   type TextProvider,
 } from '../types.js';
 
-/** Отказы, после которых имеет смысл попробовать следующую модель. */
-const RETRYABLE: ReadonlySet<ProviderErrorKind> = new Set<ProviderErrorKind>(['quota', 'not-found', 'server']);
+/** Отказы, после которых имеет смысл попробовать следующую модель. Экспортируется для двухуровневого фолбэка (см. generateWithFallback в registry.ts). */
+export const RETRYABLE: ReadonlySet<ProviderErrorKind> = new Set<ProviderErrorKind>(['quota', 'not-found', 'server']);
 
 export interface ChainAnswer {
   text: string;

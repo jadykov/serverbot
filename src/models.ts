@@ -41,6 +41,22 @@ import { config } from './config.js';
 export const MAIN_CHAIN = 'main';
 export const THINK_CHAIN = 'think';
 export const VOICE_CHAIN = 'voice';
+/**
+ * Умная и быстрая цепочки (п.3 плана: OpenRouter pay-as-you-go + Gemini-хвост).
+ *
+ * smart — обычный разговор, картинки и документы (бывший main): первый уровень
+ * `OPENAI_CHAIN_SMART` (contrib→full), второй — Gemini main-хвост. think —
+ * та же умная, но с потолком 8000: «подумать» отличается только потолком,
+ * модели те же (см. THINK_RULE в commands/ai.ts). fast — формальные
+ * JSON-планы (рисование, !скажи, !трек): luna → Gemini light.
+ *
+ * voice остаётся чисто на Gemini: звук через OpenRouter не проверен
+ * (тест п.1.5 покрыл только картинки), а неперебираемый отказ на голосовом
+ * показал бы человеку ошибку вместо ответа.
+ * light как отдельная цепочка умирает — она стала вторым уровнем fast.
+ */
+export const SMART_CHAIN = 'smart';
+export const FAST_CHAIN = 'fast';
 
 export interface ChainInfo {
   id: string;
@@ -61,9 +77,11 @@ export interface ChainInfo {
 export function listChains(): ChainInfo[] {
   return [
     {
-      id: MAIN_CHAIN,
-      title: 'Обычный',
-      hint: 'Разговор, вопросы, картинки, документы. Запас практически бесконечный.',
+      id: SMART_CHAIN,
+      title: 'Умный',
+      hint: 'Разговор, вопросы, картинки, документы. Голова — OpenRouter, запас — Gemini.',
+      // Второй уровень (Gemini-хвост); первый (OpenRouter) берётся из
+      // config.openai.chains.smart в generateWithFallback (см. registry.ts).
       models: config.gemini.chains.main,
       maxOutputTokens: config.gemini.maxOutput.main,
     },
@@ -73,6 +91,13 @@ export function listChains(): ChainInfo[] {
       hint: 'Сложные задачи и код. Дневная норма небольшая — примерно 10 запросов на человека.',
       models: config.gemini.chains.think,
       maxOutputTokens: config.gemini.maxOutput.think,
+    },
+    {
+      id: FAST_CHAIN,
+      title: 'Быстрый',
+      hint: 'Служебные планы (рисование, озвучка, треки). Голова — luna, запас — Gemini light.',
+      models: config.gemini.chains.light,
+      maxOutputTokens: config.gemini.maxOutput.main,
     },
     {
       id: VOICE_CHAIN,

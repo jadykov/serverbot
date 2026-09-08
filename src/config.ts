@@ -720,6 +720,38 @@ export const config = {
     apiKey: env('OPENAI_API_KEY') ?? '',
     baseUrl: envString('OPENAI_BASE_URL', 'https://api.openai.com/v1').replace(/\/+$/, ''),
     model: envString('OPENAI_MODEL', 'gpt-4o-mini'),
+    /**
+     * Цепочки поверх OpenAI-совместимого API (п.3 плана: OpenRouter pay-as-you-go).
+     *
+     * Тот же провайдер, что выше: OpenRouter притворяется OpenAI
+     * (`POST {baseUrl}/chat/completions`), поэтому достаточно завернуть
+     * `OPENAI_BASE_URL=https://openrouter.ai/api/v1` и положить ключ —
+     * новый класс провайдера не нужен (см. services/openai-compatible.ts).
+     *
+     * smart — умная голова (`contrib → full`), fast — быстрая (`luna`
+     * для формальных JSON-планов). За каждой — второй уровень на Gemini
+     * (см. generateWithFallback в services/registry.ts).
+     *
+     * Замерено 2026-09-08: contrib с маленьким max_tokens отдаёт ПУСТОТУ
+     * (finish length — весь лимит съедают рассуждения: при 50 токенах ответ
+     * null, при 2000 — «тест» за 5с). Поэтому потолок smart — 8000, а в
+     * вызывающих местах — пол 4000 (см. askChain). TTFT contrib ~1с,
+     * полный ответ 4–13с — голова для чата годна.
+     */
+    chains: {
+      smart: envStringList('OPENAI_CHAIN_SMART', ['meta/muse-spark-1.3-contributor', 'meta/muse-spark-1.3']),
+      fast: envStringList('OPENAI_CHAIN_FAST', ['openai/gpt-5.6-luna']),
+    },
+    /**
+     * Таймаут умной цепочки: contrib думает долго (полный ответ до ~13с
+     * на длинном русском, vision — до 25с), 90с общего AI_TIMEOUT_MS ей
+     * впритык. Быстрой хватает общих 90с (luna отвечает за ~1с).
+     */
+    timeoutMs: envInt('OPENAI_TIMEOUT_MS', 120_000),
+    maxOutput: {
+      smart: envInt('OPENAI_MAX_OUTPUT_SMART', 8_000),
+      fast: envInt('OPENAI_MAX_OUTPUT_FAST', 2_000),
+    },
   },
 
   /**

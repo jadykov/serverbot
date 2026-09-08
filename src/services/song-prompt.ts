@@ -35,8 +35,7 @@
  */
 import { config } from '../config.js';
 import { logger } from '../logger.js';
-import { generateWithChain } from './chain.js';
-import type { TextProvider } from '../types.js';
+import { generateWithFallback, type ChainLevel } from './registry.js';
 
 /** Что именно закажем у Ace-Step. */
 export interface SongPlan {
@@ -227,8 +226,7 @@ function toPlan(text: string): SongPlan | null {
  * в чате до команды.
  */
 export async function planSong(
-  provider: TextProvider,
-  models: string[],
+  levels: ChainLevel[],
   request: string,
   situation?: string,
 ): Promise<SongPlan | null> {
@@ -240,7 +238,7 @@ export async function planSong(
     : `Замысел пользователя: ${request}`;
 
   for (const attempt of [1, 2]) {
-    const answer = await generateWithChain(provider, models, userMessage, {
+    const answer = await generateWithFallback(levels, userMessage, {
       systemPrompt: attempt === 1 ? system : `${system}\n\nВАЖНО: ответ должен быть ровно одним JSON-объектом.`,
       temperature: 0.8,
     });

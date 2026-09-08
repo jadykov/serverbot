@@ -8,7 +8,7 @@
 import { GrammyError, type Bot } from 'grammy';
 import { config, isAdmin } from '../config.js';
 import { logger } from '../logger.js';
-import { describeProviders, resolveTextProvider } from '../services/registry.js';
+import { describeProviders, findTextProvider, generateWithFallback, resolveSmartLevels, resolveTextProvider } from '../services/registry.js';
 import { escapeHtml } from '../format.js';
 import { formatDuration } from '../utils.js';
 import type { BotContext } from '../types.js';
@@ -511,6 +511,34 @@ export function registerBasicCommands(bot: Bot<BotContext>): void {
           error: error instanceof Error ? error.message : String(error),
         });
         results.push('', `❌ Живой запрос не прошёл: ${escapeHtml(error instanceof Error ? error.message : 'ошибка')}`);
+      }
+
+      // 3б. Умная цепочка п.3: OpenRouter-голова → Gemini-хвост. Потолок
+      // не трогаем: resolveSmartLevels сам держит пол 4000 — contrib
+      // с меньшим отдаёт пустоту (рассуждения съедают весь лимит).
+      if (findTextProvider('openai')?.isConfigured) {
+        const smartStartedAt = Date.now();
+        try {
+          const smart = await generateWithFallback(
+            resolveSmartLevels(config.gemini.chains.main, config.gemini.maxOutput.main),
+            'Ответь ровно одним словом: работает',
+            { temperature: 0 },
+          );
+          results.push(
+            '',
+            `✅ Умная цепочка («${escapeHtml(smart.model)}») за ${Date.now() - smartStartedAt} мс` +
+              (smart.skipped.length > 0 ? ` (запас после: ${smart.skipped.map(escapeHtml).join(', ')})` : ''),
+            `Ответ модели: <i>${escapeHtml(smart.text.slice(0, 200))}</i>`,
+          );
+        } catch (error) {
+          logger.warn('Самодиагностика: умная цепочка не отвечает', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          results.push(
+            '',
+            `❌ Умная цепочка не прошла: ${escapeHtml(error instanceof Error ? error.message : 'ошибка')}`,
+          );
+        }
       }
     } else {
       results.push('', '<i>Подсказка: /test ai — проверить нейросеть настоящим запросом.</i>');

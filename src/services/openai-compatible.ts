@@ -8,7 +8,7 @@
  */
 import { config } from '../config.js';
 import { logger } from '../logger.js';
-import { ProviderRequestError, type TextGenerationOptions, type TextProvider } from '../types.js';
+import { ProviderRequestError, type ProviderErrorKind, type TextGenerationOptions, type TextProvider } from '../types.js';
 
 /** Минимально необходимая часть ответа /chat/completions. */
 interface ChatCompletionResponse {
@@ -89,16 +89,32 @@ export class OpenAiCompatibleProvider implements TextProvider {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      throw new ProviderRequestError(this.id, `Сеть недоступна или запрос прерван: ${message}`, { cause: error });
+      // AbortSignal.timeout бросает TimeoutError — помечаем честно, чтобы
+      // фолбэк второго уровня его НЕ подхватывал (иначе ждали бы дважды).
+      const kind: ProviderErrorKind =
+        error instanceof Error && error.name === 'TimeoutError' ? 'timeout' : 'unknown';
+      throw new ProviderRequestError(this.id, `Сеть недоступна или запрос прерван: ${message}`, { cause: error, kind });
     }
 
     if (!response.ok) {
       const body = await response.text().catch(() => '');
       if (response.status === 401) {
-        throw new ProviderRequestError(this.id, 'Ключ отклонён (401). Проверьте OPENAI_API_KEY и OPENAI_BASE_URL.');
+        throw new ProviderRequestError(this.id, 'Ключ отклонён (401). Проверьте OPENAI_API_KEY и OPENAI_BASE_URL.', {
+          kind: 'auth',
+        });
       }
       if (response.status === 429) {
-        throw new ProviderRequestError(this.id, 'Слишком много запросов или закончилась квота (429).');
+        // Главный сценарий фолбэка: баланс OpenRouter слит — уходим на Gemini.
+        // Без kind цепочка (и второй уровень) отказ бы НЕ перебрали.
+        throw new ProviderRequestError(this.id, 'Слишком много запросов или закончилась квота (429).', {
+          kind: 'quota',
+        });
+      }
+      if (response.status === 404) {
+        throw new ProviderRequestError(this.id, `Модель не найдена (404): ${body.slice(0, 300)}`, { kind: 'not-found' });
+      }
+      if (response.status >= 500) {
+        throw new ProviderRequestError(this.id, `HTTP ${response.status}: ${body.slice(0, 300)}`, { kind: 'server' });
       }
       throw new ProviderRequestError(this.id, `HTTP ${response.status}: ${body.slice(0, 300)}`);
     }

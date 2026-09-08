@@ -23,8 +23,7 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { escapeHtml, markdownToHtmlPage, markdownToPlainText } from '../format.js';
 import { withChatAction, sessionKey } from '../utils.js';
-import { findTextProvider } from '../services/registry.js';
-import { generateWithChain } from '../services/chain.js';
+import { generateWithFallback, resolveSmartLevels } from '../services/registry.js';
 import { rememberMessage } from '../services/search-index.js';
 import { resolveChain, THINK_CHAIN } from '../models.js';
 import type { BotContext } from '../types.js';
@@ -221,9 +220,10 @@ export async function handleFile(ctx: BotContext, request: string): Promise<void
     return;
   }
 
-  const gemini = findTextProvider('gemini');
-  if (!gemini?.isConfigured) {
-    await ctx.reply('🔌 Gemini не подключён — собирать файл некому.');
+  // Умные уровни: OpenRouter-голова, потом Gemini think-хвост.
+  const levels = resolveSmartLevels(resolveChain(THINK_CHAIN).models, config.files.maxOutputTokens);
+  if (levels.length === 0) {
+    await ctx.reply('🔌 Нейросеть не подключена — собирать файл некому.');
     return;
   }
 
@@ -231,9 +231,8 @@ export async function handleFile(ctx: BotContext, request: string): Promise<void
 
   try {
     const answer = await withChatAction(ctx, 'upload_document', () =>
-      generateWithChain(gemini, resolveChain(THINK_CHAIN).models, rest, {
+      generateWithFallback(levels, rest, {
         systemPrompt: buildInstruction(chosen.hint),
-        maxOutputTokens: config.files.maxOutputTokens,
         temperature: 0.6,
       }),
     );

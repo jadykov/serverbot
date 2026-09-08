@@ -30,30 +30,29 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { escapeHtml } from '../format.js';
 import { withChatAction } from '../utils.js';
-import { findTextProvider, resolveImageProvider } from '../services/registry.js';
+import { resolveFastLevels, resolveImageProvider, type ChainLevel } from '../services/registry.js';
 import { imageQuota } from '../services/daily-quota.js';
 import { composeDrawing, planDrawing, stripStableDiffusionSyntax } from '../services/krea-prompt.js';
-import type { BotContext, DrawDraft, TextProvider } from '../types.js';
+import type { BotContext, DrawDraft } from '../types.js';
 
 /** Префикс callback_data. Телеграм даёт на неё 64 байта — держим коротко. */
 const CB = 'd';
 
-/** id провайдера Gemini в реестре. */
-const GEMINI_ID = 'gemini';
-
 /**
- * Кто собирает промпт: Gemini на цепочке GEMINI_CHAIN_LIGHT — той же, что
+ * Кто собирает промпт: быстрая цепочка (luna → Gemini light) — та же, что
  * у !скажи и !трек (см. commands/ai.ts). Раньше на время переехала на
  * THINK_CHAIN (картинка стоит денег и нормирована — промах на этапе
  * бесплатного разговора обиднее лишних секунд), но у «light» теперь тоже
  * полноценная голова-flash, а не lite (см. config.gemini.chains.light) —
  * так что вернулись сюда: хуже не станет, а голова своя, отдельная от
  * !контекст, и не ждёт одного и того же фолбэка с ним разом.
+ *
+ * Пусто — вести разговор некому (ни OpenRouter, ни Gemini не настроены):
+ * тогда рисуем сразу, без вопросов.
  */
-function planner(): { provider: TextProvider; models: string[] } | null {
-  const provider = findTextProvider(GEMINI_ID);
-  if (!provider?.isConfigured) return null;
-  return { provider, models: config.gemini.chains.light };
+function planner(): ChainLevel[] | null {
+  const levels = resolveFastLevels();
+  return levels.length > 0 ? levels : null;
 }
 
 /** Достаёт черновики раздела, попутно выбрасывая протухшие. */
@@ -216,7 +215,7 @@ export async function startDraw(ctx: BotContext, request: string): Promise<void>
     return;
   }
 
-  const plan = await withChatAction(ctx, 'typing', () => planDrawing(helper.provider, helper.models, cleaned));
+  const plan = await withChatAction(ctx, 'typing', () => planDrawing(helper, cleaned));
 
   const draft: DrawDraft = {
     ...emptyDraft(cleaned),
@@ -338,7 +337,7 @@ export function registerDrawCommands(bot: Bot<BotContext>): void {
       const helper = planner();
       if (helper) {
         const plan = await withChatAction(ctx, 'typing', () =>
-          composeDrawing(helper.provider, helper.models, draft.original, draft.answers),
+          composeDrawing(helper, draft.original, draft.answers),
         );
         draft.prompt = plan.prompt;
         draft.summary = plan.summary;
@@ -433,7 +432,7 @@ export function registerDrawCommands(bot: Bot<BotContext>): void {
     const helper = planner();
     if (helper) {
       const plan = await withChatAction(ctx, 'typing', () =>
-        composeDrawing(helper.provider, helper.models, draft.original, draft.answers, edit),
+        composeDrawing(helper, draft.original, draft.answers, edit),
       );
       draft.prompt = plan.prompt;
       draft.summary = plan.summary;

@@ -22,8 +22,8 @@
  */
 import { config } from '../config.js';
 import { logger } from '../logger.js';
-import { generateWithChain } from './chain.js';
-import type { DrawQuestion, TextProvider } from '../types.js';
+import { generateWithFallback, type ChainLevel } from './registry.js';
+import type { DrawQuestion } from '../types.js';
 
 /** Результат обдумывания запроса: чего не хватает и что рисовать. */
 export interface DrawPlan {
@@ -136,7 +136,7 @@ function normalizeQuestions(raw: unknown): DrawQuestion[] {
  * лишними (человек написал развёрнуто), и тогда мы просто покажем черновик,
  * не потратив ни лишнего вызова, ни времени человека.
  */
-export async function planDrawing(provider: TextProvider, models: string[], request: string): Promise<DrawPlan> {
+export async function planDrawing(levels: ChainLevel[], request: string): Promise<DrawPlan> {
   const instruction = [
     'Ты помогаешь собрать запрос к модели генерации изображений Krea 2 Turbo.',
     '',
@@ -160,7 +160,7 @@ export async function planDrawing(provider: TextProvider, models: string[], requ
     ' "summary":"одна строка по-русски: что будет на картинке"}',
   ].join('\n');
 
-  return askForPlan(provider, models, instruction, `Замысел пользователя: ${request}`, request);
+  return askForPlan(levels, instruction, `Замысел пользователя: ${request}`, request);
 }
 
 /**
@@ -168,8 +168,7 @@ export async function planDrawing(provider: TextProvider, models: string[], requ
  * и правок, если человек их прислал.
  */
 export async function composeDrawing(
-  provider: TextProvider,
-  models: string[],
+  levels: ChainLevel[],
   request: string,
   answers: string[],
   edit?: string,
@@ -191,7 +190,7 @@ export async function composeDrawing(
   if (answers.length > 0) parts.push(`Уточнения: ${answers.join('; ')}`);
   if (edit) parts.push(`Правка, она важнее прежних уточнений: ${edit}`);
 
-  return askForPlan(provider, models, instruction, parts.join('\n'), request);
+  return askForPlan(levels, instruction, parts.join('\n'), request);
 }
 
 /**
@@ -203,14 +202,13 @@ export async function composeDrawing(
  * Если и второй раз мимо, рисуем по исходному запросу, а не показываем ошибку.
  */
 async function askForPlan(
-  provider: TextProvider,
-  models: string[],
+  levels: ChainLevel[],
   instruction: string,
   request: string,
   fallback: string,
 ): Promise<DrawPlan> {
   for (const attempt of [1, 2]) {
-    const answer = await generateWithChain(provider, models, request, {
+    const answer = await generateWithFallback(levels, request, {
       systemPrompt: attempt === 1 ? instruction : `${instruction}\n\nВАЖНО: ответ должен быть ровно одним JSON-объектом.`,
       temperature: 0.4,
     });

@@ -24,7 +24,7 @@ import { logger } from '../logger.js';
 import { withTimeout } from '../utils.js';
 import { hasFfmpeg, runFfmpeg } from './ffmpeg.js';
 import { translateGeminiError } from './gemini.js';
-import { generateWithChain } from './chain.js';
+import { generateWithFallback, type ChainLevel } from './registry.js';
 import { parseJsonAnswer } from './krea-prompt.js';
 import { ProviderRequestError, type TextProvider } from '../types.js';
 
@@ -235,8 +235,7 @@ function toSpeechPlan(text: string, fallback: string): SpeechPlan | null {
  * запрос целиком уходит в direction, а текстом становится контекст.
  */
 export async function planSpeech(
-  provider: TextProvider,
-  models: string[],
+  levels: ChainLevel[],
   request: string,
   context?: string,
 ): Promise<SpeechPlan> {
@@ -247,7 +246,7 @@ export async function planSpeech(
   const fallback = context || request;
 
   for (const attempt of [1, 2] as const) {
-    const answer = await generateWithChain(provider, models, userMessage, {
+    const answer = await generateWithFallback(levels, userMessage, {
       systemPrompt: attempt === 1 ? rules : `${rules}\n\nВАЖНО: ответ должен быть ровно одним JSON-объектом.`,
       temperature: 0.3,
     });
