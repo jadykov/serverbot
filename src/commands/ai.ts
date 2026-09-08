@@ -46,7 +46,7 @@
 import { GrammyError, InlineKeyboard, InputFile, type Bot } from 'grammy';
 import { config, isAdmin } from '../config.js';
 import { logger } from '../logger.js';
-import { findTextProvider, generateWithFallback, resolveFastLevels, resolveSmartLevels, resolveWebLevels } from '../services/registry.js';
+import { findTextProvider, generateWithFallback, OPENROUTER_OUTPUT_FLOOR, resolveFastLevels, resolveSmartLevels, resolveWebLevels } from '../services/registry.js';
 import { escapeHtml, markdownToTelegramHtml, MESSAGE_LIMIT, splitMarkdown } from '../format.js';
 import { sessionKey, today, trimHistoryByTokens, withChatAction } from '../utils.js';
 import { collectAlbumPart, downloadAttachment, pickPhotoFileId } from '../media.js';
@@ -1455,9 +1455,13 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
 
   // Второй проход: финальный ответ по выжимке, дополненный пониманием, —
   // в этом смысл живого поиска (см. newsFinalRule). Потолок — одно сообщение
-  // Telegram минус запас (WEB_FINAL_MAX_OUTPUT_TOKENS).
+  // Telegram минус запас (WEB_FINAL_MAX_OUTPUT_TOKENS), но не ниже
+  // OPENROUTER_OUTPUT_FLOOR: contrib с меньшим отдаёт огрызок вместо ответа
+  // (рассуждения съедают весь лимит — 2026-09-09 финал с 1400 вернулся
+  // обрывком «**Глав»). Gemini-уровень больший потолок не выбирает: его
+  // держат просьба о длине в newsFinalRule и обрезка в sendWebAnswer.
   const answer = await generateWithFallback(levels, buildNewsFinalPrompt(topic, digest.text), {
-    maxOutputTokens: config.ai.webFinalMaxOutputTokens,
+    maxOutputTokens: Math.max(config.ai.webFinalMaxOutputTokens, OPENROUTER_OUTPUT_FLOOR),
     extraInstruction: newsFinalRule(Math.max(charBudget, 0)),
     timeoutMs: config.ai.webTimeoutMs,
   });

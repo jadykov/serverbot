@@ -125,17 +125,28 @@ export async function generateWithFallback(
   throw new ProviderNotConfiguredError(textProviders.map((provider) => provider.setupHint));
 }
 
+/**
+ * Пол потолка ответа для OpenRouter-уровней: contrib с меньшим отдаёт
+ * пустоту или огрызок — весь лимит съедают рассуждения (замерено 2026-09-08:
+ * при 50 токенах content null; 2026-09-09: финал «!сети» с 1400 вернулся
+ * обрывком «**Глав», в истории сессии так и легло).
+ */
+export const OPENROUTER_OUTPUT_FLOOR = 4_000;
+
 /** Уровни умной цепочки: OpenRouter (contrib→luna) → Gemini. Пусто — только Gemini. */
 export function resolveSmartLevels(fallbackModels: string[], fallbackMaxTokens: number): ChainLevel[] {
   const openai = findTextProvider('openai');
   const levels: ChainLevel[] = [];
   if (openai?.isConfigured && config.openai.chains.smart.length > 0) {
-    // Пол 4000: contrib с меньшим потолком отдаёт пустоту — весь лимит
-    // съедают рассуждения (замерено 2026-09-08: при 50 токенах content null).
+    // Пол — OPENROUTER_OUTPUT_FLOOR выше: contrib с меньшим потолком отдаёт
+    // пустоту, весь лимит съедают рассуждения.
     levels.push({
       provider: openai,
       models: config.openai.chains.smart,
-      maxOutputTokens: Math.min(Math.max(fallbackMaxTokens, 4_000), Math.max(config.openai.maxOutput.smart, 4_000)),
+      maxOutputTokens: Math.min(
+        Math.max(fallbackMaxTokens, OPENROUTER_OUTPUT_FLOOR),
+        Math.max(config.openai.maxOutput.smart, OPENROUTER_OUTPUT_FLOOR),
+      ),
       timeoutMs: config.openai.timeoutMs,
     });
   }
@@ -208,7 +219,9 @@ function reorderWebModels(models: string[]): string[] {
  * L2 Gemini-хвост тем же спецпорядком (3.5 → … → 3.7 → gemma).
  *
  * Потолки на проход задаёт вызывающий код явно (WEB_DIGEST_/WEB_FINAL_MAX_OUTPUT_TOKENS);
- * уровневные здесь — запасные, на случай вызова без явных.
+ * уровневные здесь — запасные, на случай вызова без явных. Явный потолок ниже
+ * OPENROUTER_OUTPUT_FLOOR вызывающий код поднимает сам (см. searchWithTavily):
+ * иначе contrib вернёт огрызок вместо ответа.
  */
 export function resolveWebLevels(fallbackModels: string[]): ChainLevel[] {
   const levels: ChainLevel[] = [];
