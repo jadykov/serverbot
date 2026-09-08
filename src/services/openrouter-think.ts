@@ -19,10 +19,11 @@
  *    и 4800 на текст, чего хватает и на длинный ответ по существу;
  *  • сами мысли не возвращаются (reasoning.exclude). Платим за них всё
  *    равно — но в чате они не нужны, там нужен ответ;
- *  • модель — переменная в .env, и это не лень, а осознанный выбор: цена
- *    за один и тот же вопрос отличается впятеро (см. DEEP_MODEL), а кто
- *    из них лучше рассуждает по-русски, выясняется одним вечером с одним
- *    и тем же вопросом;
+ *  • модель — цепочка в .env (DEEP_CHAIN, голова contrib, запас luna),
+ *    и это не лень, а осознанный выбор: цена за один и тот же вопрос
+ *    отличается впятеро, а кто из них лучше рассуждает по-русски,
+ *    выясняется одним вечером с одним и тем же вопросом. DEEP_MODEL
+ *    оставлен как алиас головы ради совместимости со старым .env;
  *  • ключ тот же, что у картинок и запасного поиска: аккаунт OpenRouter
  *    один, отдельный заводить незачем;
  *  • свежих фактов у модели нет и быть не может — её знания кончаются
@@ -32,10 +33,24 @@
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { today } from '../utils.js';
-import { ProviderRequestError } from '../types.js';
+import { ProviderRequestError, type ProviderErrorKind } from '../types.js';
 import type { WebPage } from './tavily.js';
 
 const PROVIDER_ID = 'openrouter';
+
+/**
+ * Отказы, после которых thinkDeeply пробует следующую модель цепочки.
+ * Свой набор, глобальный RETRYABLE из chain.ts не трогаем: там таймаут
+ * неперебираемый сознательно, и здесь тоже — см. комментарий к таймауту
+ * в thinkDeeply. Пустой ответ по обрыву длины (kind server) перебирается:
+ * бюджет мог съесть именно эту модель, а запасная напишет короче.
+ */
+const DEEP_RETRYABLE: ReadonlySet<ProviderErrorKind> = new Set<ProviderErrorKind>([
+  'quota',
+  'not-found',
+  'server',
+  'unknown',
+]);
 
 /** Ответ chat/completions — берём только то, что нужно. */
 interface ChatResponse {
@@ -100,7 +115,7 @@ export function deepThoughtBudget(): number {
 
 export const DEEP_SETUP_HINT =
   'Добавьте OPENROUTER_API_KEY в .env (ключ и баланс: https://openrouter.ai/keys) — ' +
-  'размышление идёт через него же, что и картинки. Модель задаётся DEEP_MODEL.';
+  'размышление идёт через него же, что и картинки. Порядок моделей задаётся DEEP_CHAIN.';
 
 /** Настроено ли размышление. Ключ общий с картинками и поиском. */
 export function isDeepThinkConfigured(): boolean {
@@ -177,14 +192,79 @@ function userMessage(question: string, pages: WebPage[]): string {
  * Таймаут свой и большой: с размышлением ответ идёт минуты, а не секунды,
  * и общий девяностосекундный потолок обрывал бы ровно те вопросы, ради
  * которых команду и позвали.
+ *
+ * Цепочка идёт по config.openrouter.deep.chain (по умолчанию contrib →
+ * luna): первый успех — ответ. Дальше — только на DEEP_RETRYABLE
+ * (квота, пропавшая модель, сбой провайдера, неизвестное); auth,
+ * bad-request (модель не понимает reasoning), timeout и блокировки —
+ * наружу сразу.
+ *
+ * Таймаут — на каждую попытку отдельно, а не общий на цепочку: contrib
+ * думает долго (полный ответ до ~13 с и больше), deep-ответы большие,
+ * и общий бюджет обрезал бы запасную модель ровно тогда, когда голова
+ * съела время впустую. Худший случай — N × DEEP_TIMEOUT_MS, но на деле
+ * retryable-отказы это быстрые HTTP-ошибки (4xx/5xx за доли секунды),
+ * а таймаут сам не перебирается — так что вторая попытка почти никогда
+ * не ждёт полных 300 с сверх первой.
  */
 export async function thinkDeeply(question: string, pages: WebPage[] = []): Promise<DeepAnswer> {
   if (!isDeepThinkConfigured()) {
     throw new ProviderRequestError(PROVIDER_ID, DEEP_SETUP_HINT, { kind: 'auth' });
   }
 
-  const { model, effort, maxTokens, timeoutMs } = config.openrouter.deep;
+  const { chain, model: head, effort, maxTokens, timeoutMs } = config.openrouter.deep;
+  const models = chain.length > 0 ? chain : [head];
   const startedAt = Date.now();
+
+  const skipped: string[] = [];
+  let lastError: ProviderRequestError | undefined;
+
+  for (const model of models) {
+    try {
+      const answer = await requestDeepModel(model, question, pages, { effort, maxTokens, timeoutMs }, startedAt);
+      if (skipped.length > 0) {
+        logger.info('Размышление ответила резервная модель', { model, skipped });
+      }
+      return answer;
+    } catch (error) {
+      const kind = error instanceof ProviderRequestError ? error.kind : 'unknown';
+
+      // Причина, которая повторится на любой модели, — показываем как есть.
+      if (!DEEP_RETRYABLE.has(kind)) throw error;
+
+      lastError = error instanceof ProviderRequestError ? error : new ProviderRequestError(PROVIDER_ID, String(error), { kind });
+      skipped.push(model);
+      logger.warn('Deep-модель отказала, беру следующую из цепочки', {
+        model,
+        kind,
+        message: lastError.message,
+      });
+    }
+  }
+
+  throw new ProviderRequestError(
+    PROVIDER_ID,
+    `Ни одна deep-модель не смогла ответить — перепробованы все ${skipped.length}: ${skipped.join(', ')}.\n\n` +
+      `Последняя причина: ${lastError?.message ?? 'неизвестна'}`,
+    { cause: lastError, kind: lastError?.kind ?? 'unknown' },
+  );
+}
+
+interface DeepRequestOptions {
+  effort: string;
+  maxTokens: number;
+  timeoutMs: number;
+}
+
+/** Один вызов chat/completions на заданной модели. Бросает ProviderRequestError с честным kind. */
+async function requestDeepModel(
+  model: string,
+  question: string,
+  pages: WebPage[],
+  options: DeepRequestOptions,
+  startedAt: number,
+): Promise<DeepAnswer> {
+  const { effort, maxTokens, timeoutMs } = options;
 
   let response: Response;
   try {
@@ -204,7 +284,9 @@ export async function thinkDeeply(question: string, pages: WebPage[] = []): Prom
         ],
         max_tokens: maxTokens,
         // Собственно думанье. exclude — не показывать мысли: платим за них
-        // всё равно, но в чат идёт ответ, а не черновик.
+        // всё равно, но в чат идёт ответ, а не черновик. Одинаково на обеих
+        // моделях цепочки: запасная должна думать так же, а не отвечать
+        // наспех.
         reasoning: { effort, exclude: true },
         usage: { include: true },
       }),
@@ -212,9 +294,12 @@ export async function thinkDeeply(question: string, pages: WebPage[] = []): Prom
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    // AbortSignal.timeout бросает TimeoutError — помечаем честно, чтобы
+    // цепочка его НЕ перебирала: ждать ещё 300 с за молчание — не страховка.
+    const kind: ProviderErrorKind = error instanceof Error && error.name === 'TimeoutError' ? 'timeout' : 'server';
     throw new ProviderRequestError(PROVIDER_ID, `Не удалось связаться с OpenRouter: ${message}`, {
       cause: error,
-      kind: 'server',
+      kind,
     });
   }
 
@@ -238,6 +323,14 @@ export async function thinkDeeply(question: string, pages: WebPage[] = []): Prom
         kind: 'quota',
       });
     }
+    // Модели из обращения выводят: вчера работавшее имя сегодня отвечает
+    // 404. Это главный сценарий подхвата запасной — без kind цепочка
+    // отказ бы НЕ перебрала.
+    if (response.status === 404) {
+      throw new ProviderRequestError(PROVIDER_ID, `Модели ${model} нет на OpenRouter (404): ${body.slice(0, 200)}.`, {
+        kind: 'not-found',
+      });
+    }
     // 400 здесь чаще всего значит, что выбранная модель не понимает reasoning
     // в том виде, в каком его прислали, — об этом и говорим прямо, иначе
     // человек будет искать причину в своём вопросе.
@@ -245,7 +338,7 @@ export async function thinkDeeply(question: string, pages: WebPage[] = []): Prom
       throw new ProviderRequestError(
         PROVIDER_ID,
         `OpenRouter отклонил запрос (400): ${body.slice(0, 200)}. ` +
-          `Проверьте DEEP_MODEL (${model}) и DEEP_EFFORT (${effort}): размышление поддерживают не все модели.`,
+          `Проверьте DEEP_CHAIN (${model}) и DEEP_EFFORT (${effort}): размышление поддерживают не все модели.`,
         { kind: 'bad-request' },
       );
     }
