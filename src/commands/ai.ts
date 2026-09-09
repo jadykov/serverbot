@@ -1547,7 +1547,9 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
     }
 
     // Поздняя «Отмена» (уже во время выжимки): файлы вдогонку не шлём.
-    if (takeTask(cancelKey) === undefined) return;
+    // Запись уже забрана проверкой выше, реестр тут всегда пуст —
+    // смотрим на сигнал, а не на него.
+    if (controller.signal.aborted) return;
 
     await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
     // Только файлом, без сопроводительного сообщения в чат (см. описание выше):
