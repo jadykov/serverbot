@@ -18,6 +18,7 @@ import { createHttpServer, listen } from './server.js';
 import { describeProviders } from './services/registry.js';
 import { flushAll } from './services/search-index.js';
 import { savePending } from './services/digest.js';
+import { startDailyRoleTimer } from './services/daily-role.js';
 
 async function main(): Promise<void> {
   assertConfigValid();
@@ -57,6 +58,10 @@ async function main(): Promise<void> {
   const runner: RunnerHandle = run(bot);
   logger.info('Long polling запущен');
 
+  // Роль дня: минутный таймер, в 18:00 мск выбирает каждому разделу роль
+  // на завтра по его выжимке. Останавливается вместе с ботом (см. shutdown).
+  const roleTimer = startDailyRoleTimer();
+
   logger.info('✅ Бот готов к работе');
 
   // ------------------------------------------------------------ shutdown
@@ -77,6 +82,7 @@ async function main(): Promise<void> {
 
     try {
       if (runner.isRunning()) await runner.stop();
+      clearInterval(roleTimer);
       // Реплики, не набравшие полную пачку, ждут своей очереди в памяти.
       // Без этой строчки каждая выкатка тихо теряла бы последние сообщения
       // каждого раздела: в архив поиска они бы уже не попали никогда.

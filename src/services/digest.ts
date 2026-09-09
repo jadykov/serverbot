@@ -22,10 +22,11 @@ import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/pro
 import path from 'node:path';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
+import { updateFastMemory } from './fast-memory.js';
 import { findTextProvider } from './registry.js';
 
 /** Одна ещё не сжатая реплика, ждущая своей очереди в буфере. */
-interface PendingLine {
+export interface PendingLine {
   who: string;
   text: string;
 }
@@ -187,6 +188,9 @@ async function mergeDigest(key: string, lines: PendingLine[]): Promise<void> {
     });
 
     await saveDigest(key, text.trim().slice(0, config.digest.maxChars));
+    // Быстрая память обновляется тем же куском — вторым дешёвым вызовом,
+    // всё ещё в фоне после ответа человеку.
+    await updateFastMemory(key, lines);
   } catch (error) {
     // Память — удобство, а не основная работа бота: не срослось — не беда,
     // прежняя выжимка остаётся как была, а буфер уже пуст (реплики не потеряны
@@ -256,4 +260,24 @@ export async function getDigest(key: string): Promise<string> {
   if (!config.digest.enabled) return '';
   await ensurePendingLoaded();
   return loadDigest(key);
+}
+
+/**
+ * Ключи разделов, у которых есть готовая выжимка. Нужно роли дня:
+ * она обходит разделы и выбирает каждому свою. Файлы недосчитанных
+ * буферов (pending-*) — не разделы, файл ролей (roles.json) — тем более.
+ */
+export async function listDigestKeys(): Promise<string[]> {
+  let names: string[];
+  try {
+    names = await readdir(path.join(config.session.dir, 'digest'));
+  } catch {
+    return []; // Каталога ещё нет — разделов нет.
+  }
+  return names
+    .filter(
+      (name) =>
+        name.endsWith('.json') && !name.startsWith('pending-') && name !== 'roles.json' && !name.startsWith('notes-'),
+    )
+    .map((name) => name.slice(0, -'.json'.length));
 }

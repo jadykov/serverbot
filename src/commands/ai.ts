@@ -47,6 +47,8 @@ import { GrammyError, InlineKeyboard, InputFile, type Bot } from 'grammy';
 import { config, isAdmin } from '../config.js';
 import { logger } from '../logger.js';
 import { findTextProvider, generateWithFallback, OPENROUTER_OUTPUT_FLOOR, resolveFastLevels, resolveSmartLevels, resolveWebLevels } from '../services/registry.js';
+import { getDailyRole } from '../services/daily-role.js';
+import { getFastMemory } from '../services/fast-memory.js';
 import { escapeHtml, markdownToTelegramHtml, MESSAGE_LIMIT, splitMarkdown } from '../format.js';
 import { sessionKey, today, trimHistoryByTokens, withChatAction } from '../utils.js';
 import { collectAlbumPart, downloadAttachment, pickPhotoFileId } from '../media.js';
@@ -582,12 +584,26 @@ async function askChain(
   // выпало из живой истории ниже (см. src/services/digest.ts). Пустая —
   // если слияний ещё не было или память выключена.
   const digestText = key ? await getDigest(key) : '';
+  // Роль дня — только обычным ответам (smart): голос, файлы и поиск её
+  // не видят. Нет роли — правила как раньше, это обычный исход, а не ошибка.
+  const dailyRole = chain.id === SMART_CHAIN && key ? await getDailyRole(key) : '';
+  // Быстрая памятка — тоже только обычным ответам. Вес ограничен при записи
+  // (8 строк по 140 знаков), так что в промпт она едет целиком.
+  const fastMemory = chain.id === SMART_CHAIN && key ? await getFastMemory(key) : '';
   const rules = [
     length === 'detailed' ? THINK_RULE : undefined,
     asFile === 'html' ? HTML_FILE_RULE : undefined,
     digestText
       ? `Вот твоя память о более ранних разговорах этого раздела — используй её, если пригодится, ` +
         `но не пересказывай целиком и не упоминай, что это «память»: ${digestText}`
+      : undefined,
+    dailyRole
+      ? `Роль на сегодня для обычных ответов (выбрана вечером по выжимке дня): ${dailyRole} ` +
+        `Держись её как тона и фокуса, остальные правила этим не отменяются.`
+      : undefined,
+    fastMemory
+      ? `Памятка о собеседнике (что просили, как говорить, что делать и не делать):\n${fastMemory}\n` +
+        `Держись её — это прямые требования человека, они сильнее общих правил оформления.`
       : undefined,
     `Сейчас с тобой говорит ${speaker}. Не называй людей по именам — путаешь их и обращаешься ` +
       `не к тому, к кому нужно. Обращайся без имён.`,
@@ -1105,8 +1121,11 @@ function newsFinalRule(charBudget: number): string {
     '2) дальше лид — прямой ответ на вопрос в двух-трёх строках обычным текстом;',
     '3) затем строка **Главное** и 3–6 коротких пунктов, каждый с новой строки начинается с символа ▪ — по одному факту в пункте;',
     '4) если фактам нужен контекст или связь между ними — блок из строки **Контекст** и одного-двух предложений после списка.',
+    'Каждый блок отделяй пустой строкой: заголовок, лид, строка **Главное**, список, блок **Контекст** —',
+    'всё через пустую строку, иначе текст слипнется в простыню.',
     'Жирный — только заголовок и слова Главное/Контекст, больше нигде. Самые ключевые слова (не больше трёх на весь ответ — имя, число, название) оберни в ++плюсы++: это подчёркивание.',
-    'Других эмодзи и смайлов не ставь вовсе — только 📰 в первой строке.',
+    '*Курсив* — редко и только для названий, не для выделения важного.',
+    'Эмодзи: 📰 в первой строке и 🔗 у источников — свои, плюс максимум один цветной по настроению новости. Больше смайликов не ставь, не в каждое сообщение они нужны.',
     'Разметка — только **жирный**, ++подчёркивание++ и пункты на ▪: без решёток, таблиц, цитат, кода и разделителей.',
     `Длина ответа — строго ${min}–${charBudget} знаков: это почти всё сообщение Telegram,`,
     'остаток займёт список источников, который допишет бот сам. Меньше — мало по такому',
@@ -1365,6 +1384,11 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
     return;
   }
 
+  // Поиск идёт десятки секунд (Tavily + два прохода) — предупреждаем сразу,
+  // как в «!размышлении»: иначе молчание читается как поломка. Сообщение
+  // удаляется, когда ответ и источники уже в чате (см. finally ниже).
+  const notice = await ctx.reply('🤔 Ищу в сети свежие страницы — это займёт полминуты…');
+
   try {
     const answered = await withChatAction(ctx, 'typing', () => searchWithTavily(ctx, query));
 
@@ -1386,6 +1410,8 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
     // Норма — про потраченное, а не про попытки: неудачный поиск слот вернёт.
     await webQuota.release(userId);
     await replyWithError(ctx, error);
+  } finally {
+    await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
   }
 }
 
