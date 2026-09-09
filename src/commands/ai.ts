@@ -80,7 +80,7 @@ import {
 } from '../services/tavily.js';
 import { DEEP_SETUP_HINT, deepThoughtBudget, isDeepThinkConfigured, thinkDeeply } from '../services/openrouter-think.js';
 import { deepQuota, imageQuota, messagesQuota, resetEveryQuota, trackQuota, ttsQuota, webQuota, type DailyQuota } from '../services/daily-quota.js';
-import { handleFile, sendAnswerAsFile, type AnswerFormat } from './file.js';
+import { buildDeepDigestHtml, handleFile, sendAnswerAsFile, sendHtmlDigest, type AnswerFormat } from './file.js';
 import { resolveChain, SMART_CHAIN, THINK_CHAIN, VOICE_CHAIN, type ChainInfo } from '../models.js';
 import {
   ProviderNotConfiguredError,
@@ -1448,6 +1448,7 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
         '<code>/гем !размышление стоит ли доверять интуиции в спорах</code>\n\n' +
         'Вопрос уходит без истории раздела — это разговор с чистого листа, ' +
         'зато с настоящим размышлением перед ответом. ' +
+        'Приедут два файла: разбор (.md) и наглядная выжимка главного (.html). ' +
         `Платно: ${config.deepQuota.perUserPerDay} в день на человека. `,
       { parse_mode: 'HTML' },
     );
@@ -1520,6 +1521,34 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
     // в чате — «Остановлено». Файл вдогонку не шлём.
     if (takeTask(cancelKey) === undefined) return;
 
+    // Разбор готов, дальше — наглядная HTML-выжимка для телефона вторым
+    // вызовом (без размышления: думать уже не о чем). Уведомление держим
+    // до конца, чтобы молчание не читалось как поломка.
+    await ctx.api
+      .editMessageText(notice.chat.id, notice.message_id, '✅ Разбор готов, собираю наглядную выжимку для телефона…')
+      .catch(() => undefined);
+
+    // Выжимка — часть того же ответа: слот deepQuota уже забран и не
+    // возвращается, даже если выжимка не соберётся. Не собралась — приедет
+    // один разбор с честной припиской, это не повод ронять весь ответ.
+    let digest: string | null = null;
+    let digestNote: string | undefined;
+    try {
+      digest = await withChatAction(ctx, 'upload_document', () =>
+        buildDeepDigestHtml(question, answer.text, controller.signal),
+      );
+    } catch (error) {
+      // Отмена кнопкой — как выше: тихо уходим, файлы не шлём.
+      if (isCancelled(error)) return;
+      logger.warn('HTML-выжимка к размышлению не собралась, отправляю один разбор', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      digestNote = 'Наглядная HTML-выжимка не собралась — приехал только разбор.';
+    }
+
+    // Поздняя «Отмена» (уже во время выжимки): файлы вдогонку не шлём.
+    if (takeTask(cancelKey) === undefined) return;
+
     await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
     // Только файлом, без сопроводительного сообщения в чат (см. описание выше):
     // подпись с ценой и остатком, предупреждение об обрыве и топ-20 источников
@@ -1560,7 +1589,9 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
     // Всегда файлом: в этом и смысл команды —
     // развёрнутый разбор, а не сообщение, обрезанное под лимит Telegram.
     // Обычные ответы, наоборот, всегда одним сообщением (см. sendAnswer).
-    await sendAnswerAsFile(ctx, answer.text + footer + sourcesSection, 'md', question);
+    // Рядом — наглядная HTML-выжимка главного, если собралась.
+    await sendAnswerAsFile(ctx, answer.text + footer + sourcesSection, 'md', question, digestNote);
+    if (digest) await sendHtmlDigest(ctx, digest, question);
 
     // В архив поиска — да, в историю раздела — нет (см. описание выше).
     const key = sessionKey(ctx);
