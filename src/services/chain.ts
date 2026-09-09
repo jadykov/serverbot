@@ -21,6 +21,7 @@ import {
   type TextGenerationOptions,
   type TextProvider,
 } from '../types.js';
+import { throwIfAborted } from './cancel.js';
 
 /** Отказы, после которых имеет смысл попробовать следующую модель. Экспортируется для двухуровневого фолбэка (см. generateWithFallback в registry.ts). */
 export const RETRYABLE: ReadonlySet<ProviderErrorKind> = new Set<ProviderErrorKind>(['quota', 'not-found', 'server']);
@@ -56,6 +57,9 @@ export async function generateWithChain(
   let lastError: ProviderRequestError | undefined;
 
   for (const model of models) {
+    // Отмена не перебирается: kind 'cancelled' ниже в RETRYABLE нет,
+    // а проверка здесь экономит один заведомо обречённый вызов.
+    throwIfAborted(provider.id, options.signal);
     try {
       const text = await provider.generateText(prompt, { ...options, model });
       if (skipped.length > 0) {

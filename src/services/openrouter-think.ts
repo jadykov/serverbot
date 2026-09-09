@@ -34,6 +34,7 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { today } from '../utils.js';
 import { ProviderRequestError, type ProviderErrorKind } from '../types.js';
+import { throwIfAborted, withTimeoutSignal } from './cancel.js';
 import type { WebPage } from './tavily.js';
 
 const PROVIDER_ID = 'openrouter';
@@ -209,7 +210,7 @@ function userMessage(question: string, pages: WebPage[]): string {
  * а таймаут сам не перебирается — так что вторая попытка почти никогда
  * не ждёт полных 300 с сверх первой.
  */
-export async function thinkDeeply(question: string, pages: WebPage[] = []): Promise<DeepAnswer> {
+export async function thinkDeeply(question: string, pages: WebPage[] = [], signal?: AbortSignal): Promise<DeepAnswer> {
   if (!isDeepThinkConfigured()) {
     throw new ProviderRequestError(PROVIDER_ID, DEEP_SETUP_HINT, { kind: 'auth' });
   }
@@ -222,8 +223,10 @@ export async function thinkDeeply(question: string, pages: WebPage[] = []): Prom
   let lastError: ProviderRequestError | undefined;
 
   for (const model of models) {
+    // Отмена — не повод для запасной модели, она уже не нужна никому.
+    throwIfAborted(PROVIDER_ID, signal);
     try {
-      const answer = await requestDeepModel(model, question, pages, { effort, maxTokens, timeoutMs }, startedAt);
+      const answer = await requestDeepModel(model, question, pages, { effort, maxTokens, timeoutMs }, startedAt, signal);
       if (skipped.length > 0) {
         logger.info('Размышление ответила резервная модель', { model, skipped });
       }
@@ -265,6 +268,7 @@ async function requestDeepModel(
   pages: WebPage[],
   options: DeepRequestOptions,
   startedAt: number,
+  signal?: AbortSignal,
 ): Promise<DeepAnswer> {
   const { effort, maxTokens, timeoutMs } = options;
 
@@ -292,13 +296,19 @@ async function requestDeepModel(
         reasoning: { effort, exclude: true },
         usage: { include: true },
       }),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: withTimeoutSignal(signal, timeoutMs),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     // AbortSignal.timeout бросает TimeoutError — помечаем честно, чтобы
     // цепочка его НЕ перебирала: ждать ещё 300 с за молчание — не страховка.
-    const kind: ProviderErrorKind = error instanceof Error && error.name === 'TimeoutError' ? 'timeout' : 'server';
+    // Внешняя отмена (AbortError) — kind 'cancelled', тоже не перебирается.
+    const kind: ProviderErrorKind =
+      error instanceof Error && error.name === 'TimeoutError'
+        ? 'timeout'
+        : error instanceof Error && error.name === 'AbortError'
+          ? 'cancelled'
+          : 'server';
     throw new ProviderRequestError(PROVIDER_ID, `Не удалось связаться с OpenRouter: ${message}`, {
       cause: error,
       kind,

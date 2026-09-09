@@ -9,6 +9,7 @@ import { GoogleGenAI, ThinkingLevel, type GenerateContentResponse, type Part, ty
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { withTimeout } from '../utils.js';
+import { cancelledError } from './cancel.js';
 import { ProviderRequestError, type TextGenerationOptions, type TextProvider } from '../types.js';
 
 /**
@@ -94,7 +95,7 @@ export function outputLimitFromError(message: string): number | null {
 /** Кто такой бот. Роль одна на всех: своих ролей по топикам у бота нет. */
 const DEFAULT_ROLE = [
   'Ты — дружелюбный ассистент внутри Telegram-бота.',
-  'Отвечай на языке пользователя, по делу и без «воды».',
+  'Отвечай на языке пользователя, по делу.',
 ].join(' ');
 
 /**
@@ -272,10 +273,33 @@ export class GeminiProvider implements TextProvider {
         `Gemini (${model})`,
       );
 
+    // SDK сигнала отмены не принимает — догоняем гонкой: кнопка «Отмена»
+    // бросает kind 'cancelled' (цепочки его не перебирают), а сам HTTP-запрос
+    // в SDK тихо доработает в фоне. Слушатель одноразовый и снимается сразу.
+    const raceCancel = <T>(work: Promise<T>): Promise<T> => {
+      const signal = options.signal;
+      if (!signal) return work;
+      if (signal.aborted) {
+        // Работа уже запущена (аргумент вычислен раньше), но не нужна:
+        // глушим её исход, иначе поздний reject уронит процесс как
+        // необработанный.
+        work.catch(() => undefined);
+        throw cancelledError(this.id);
+      }
+      let onAbort: (() => void) | undefined;
+      const cancel = new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(cancelledError(this.id));
+        signal.addEventListener('abort', onAbort, { once: true });
+      });
+      return Promise.race([work, cancel]).finally(() => {
+        if (onAbort) signal.removeEventListener('abort', onAbort);
+      });
+    };
+
     try {
       let response: GenerateContentResponse;
       try {
-        response = await call(requested);
+        response = await raceCancel(call(requested));
       } catch (error) {
         // Просили больше, чем модель умеет отдать за раз. Не беда человека:
         // повторяем тем же ходом, но с потолком, который назвала сама модель.
@@ -283,7 +307,7 @@ export class GeminiProvider implements TextProvider {
         if (limit === null || limit >= requested) throw error;
 
         logger.warn('Модель не приняла потолок ответа, повторяю с её собственным', { model, requested, limit });
-        response = await call(limit);
+        response = await raceCancel(call(limit));
       }
 
       const text = response.text?.trim();

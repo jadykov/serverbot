@@ -9,6 +9,7 @@ import { GeminiProvider } from './gemini.js';
 import { OpenAiCompatibleProvider } from './openai-compatible.js';
 import { OpenRouterImageProvider } from './openrouter-image.js';
 import { generateWithChain, RETRYABLE, type ChainAnswer } from './chain.js';
+import { throwIfAborted } from './cancel.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import {
@@ -100,6 +101,8 @@ export async function generateWithFallback(
 
   for (const level of levels) {
     if (!level.provider.isConfigured || level.models.length === 0) continue;
+    // Отмена — не повод для следующего уровня (см. chain.ts).
+    throwIfAborted(level.provider.id, options.signal);
     try {
       const answer = await generateWithChain(level.provider, level.models, prompt, {
         ...options,

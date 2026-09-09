@@ -57,6 +57,15 @@ import { listVoiceNames, parseVoiceRequest, planSpeech, synthesizeSpeech, type V
 import { rememberMessage, searchMessages } from '../services/search-index.js';
 import { getDigest, noteMessage as noteDigestMessage } from '../services/digest.js';
 import { authorName } from '../middlewares/searchIndex.js';
+import {
+  CANCEL_CB,
+  cancelKeyboard,
+  isCancelled,
+  peekTask,
+  registerTask,
+  takeTask,
+  taskKey,
+} from '../services/cancel.js';
 import { HELP_TEXT_PLAIN } from './basic.js';
 import { prepareDocument } from '../services/documents.js';
 import { prepareVoice } from '../services/voice.js';
@@ -434,7 +443,8 @@ const CHAT_LENGTH_RULE = [
   `Ответ должен уместиться в одно сообщение Telegram: не более ${MESSAGE_LIMIT} знаков`,
   'включая пробелы и разметку, и всё, не более.',
   'Отдельного файла не будет — ответ, который не влезет, файлом не приедет,',
-  'поэтому сокращай и уплотняй, а не раздувай.',
+  'поэтому распорядись местом с толком: на простое отвечай коротко,',
+  'на сложное — подробно, можешь занять всё сообщение целиком.',
 ].join(' ');
 
 /**
@@ -1416,10 +1426,24 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
     return;
   }
 
+  // Ключ задачи для кнопки «Отмена» — наружу из try: catch/finally
+  // const из try не видят (отдельные блоки). Пусто — reply не ушёл,
+  // takeTask тогда безвредный no-op.
+  let cancelKey = '';
   try {
     // Думает модель минуты, а не секунды, — предупреждаем сразу, иначе
-    // молчание в ответ на заданный вопрос читается как поломка.
-    const notice = await ctx.reply('🤔 Смотрю, что есть по теме, и думаю — это займёт минуту-другую…');
+    // молчание в ответ на заданный вопрос читается как поломка. Под
+    // уведомлением — кнопка «Отмена»: контроллер регистрируется сразу
+    // после отправки, сигнал едет вниз до fetch (Tavily + thinkDeeply).
+    const notice = await ctx.reply(
+      '🤔 Смотрю, что есть по теме, и думаю — это займёт минуту-другую…\n\n' +
+        'Передумали — жмите «Отмена» под этим сообщением.',
+    );
+    cancelKey = taskKey(notice.chat.id, notice.message_id);
+    const controller = registerTask(cancelKey, userId, 'deep');
+    await ctx.api
+      .editMessageReplyMarkup(notice.chat.id, notice.message_id, { reply_markup: cancelKeyboard(cancelKey) })
+      .catch(() => undefined);
 
     // Свежие страницы: не нашлись или Tavily отказал — не беда, думаем
     // по памяти. Ради фактов отменять размышление было бы странно.
@@ -1428,12 +1452,16 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
     const deep = config.openrouter.deep;
     const wanted = deep.search && isTavilyConfigured();
     const pages: WebPage[] = wanted
-      ? await searchTavily(question, {
-          depth: deep.searchDepth,
-          maxResults: deep.searchResults,
-          pageChars: deep.searchPageChars,
-          autoParameters: true,
-        }).catch((error) => {
+      ? await searchTavily(
+          question,
+          {
+            depth: deep.searchDepth,
+            maxResults: deep.searchResults,
+            pageChars: deep.searchPageChars,
+            autoParameters: true,
+          },
+          controller.signal,
+        ).catch((error) => {
           logger.warn('Свежих страниц к размышлению не будет', {
             error: error instanceof Error ? error.message : String(error),
           });
@@ -1445,7 +1473,11 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
     // сюда, в вопрос для модели — а не в query для Tavily выше: поиску нужны
     // чистые ключевые слова, а не «Пользователь отвечает на твою реплику…».
     const questionForModel = buildReplyQuotePrompt(ctx, question, ctx.message?.reply_to_message);
-    const answer = await withChatAction(ctx, 'typing', () => thinkDeeply(questionForModel, pages));
+    const answer = await withChatAction(ctx, 'typing', () => thinkDeeply(questionForModel, pages, controller.signal));
+
+    // Кнопку нажали, пока думала: запись уже забрана, слот возвращён,
+    // в чате — «Остановлено». Файл вдогонку не шлём.
+    if (takeTask(cancelKey) === undefined) return;
 
     await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
     // Только файлом, без сопроводительного сообщения в чат (см. описание выше):
@@ -1493,9 +1525,17 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
     const key = sessionKey(ctx);
     if (key) rememberMessage(key, { ts: Date.now(), who: 'бот', text: answer.text });
   } catch (error) {
+    // Отмена кнопкой — не ошибка: уведомление уже заменено на «Остановлено»,
+    // слот нормы возвращён там же. Тихо уходим.
+    if (isCancelled(error)) return;
     // Норма — про полученные ответы, а не про попытки.
     await deepQuota.release(userId);
     await replyWithError(ctx, error);
+  } finally {
+    // Запись забирает первый действовавший: кнопка — при отмене, успех —
+    // выше перед отправкой файла, здесь — остатки после ошибки. Иначе
+    // поздняя «Отмена» по упавшему запросу вернула бы слот второй раз.
+    takeTask(cancelKey);
   }
 }
 
@@ -1544,10 +1584,27 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
   // Поиск идёт десятки секунд (Tavily + два прохода) — предупреждаем сразу,
   // как в «!размышлении»: иначе молчание читается как поломка. Сообщение
   // удаляется, когда ответ и источники уже в чате (см. finally ниже).
-  const notice = await ctx.reply('🤔 Ищу в сети свежие страницы — это займёт полминуты…');
+  // Под уведомлением — кнопка «Отмена», сигнал едет в searchWithTavily.
+  // Объявления — наружу из try: finally const из try не видит.
+  let cancelKey = '';
+  let controller: AbortController | undefined = undefined;
+  const notice = await ctx.reply(
+    '🤔 Ищу в сети свежие страницы — это займёт полминуты…\n\n' + 'Передумали — жмите «Отмена» под этим сообщением.',
+  );
+  cancelKey = taskKey(notice.chat.id, notice.message_id);
+  controller = registerTask(cancelKey, userId, 'web');
+  // Сигнал — в локальный const: замыкание ниже сбросило бы сужение let.
+  const signal = controller.signal;
+  await ctx.api
+    .editMessageReplyMarkup(notice.chat.id, notice.message_id, { reply_markup: cancelKeyboard(cancelKey) })
+    .catch(() => undefined);
 
   try {
-    const answered = await withChatAction(ctx, 'typing', () => searchWithTavily(ctx, query));
+    const answered = await withChatAction(ctx, 'typing', () => searchWithTavily(ctx, query, signal));
+
+    // Кнопку нажали, пока искал: запись уже забрана, слот возвращён,
+    // в чате — «Остановлено». Молча уходим, уведомление не трогаем.
+    if (takeTask(cancelKey) === undefined) return;
 
     // Ответить не вышло — ничего не нашлось или Gemini не подключён,
     // сообщение об этом уже ушло пользователю. Слот нормы возвращаем:
@@ -1564,11 +1621,19 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
       ctx.session.history = trimHistoryByTokens(ctx.session.history, config.ai.historyMaxTokens);
     }
   } catch (error) {
+    // Отмена кнопкой — не ошибка: уведомление уже заменено на «Остановлено»,
+    // слот нормы возвращён там же. Тихо уходим.
+    if (isCancelled(error)) return;
     // Норма — про потраченное, а не про попытки: неудачный поиск слот вернёт.
     await webQuota.release(userId);
     await replyWithError(ctx, error);
   } finally {
-    await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
+    takeTask(cancelKey);
+    // Отменённое уведомление уже говорит «Остановлено» — его оставляем,
+    // остальное удаляем, как раньше.
+    if (!controller?.signal.aborted) {
+      await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
+    }
   }
 }
 
@@ -1587,8 +1652,8 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
  * (см. RETRYABLE в chain.ts), так что запрос падал целиком. Меньше страниц —
  * меньше веса на входе первого прохода и меньше риск не уложиться.
  */
-async function searchWithTavily(ctx: BotContext, query: string): Promise<string | null> {
-  const pages = await searchTavily(query);
+async function searchWithTavily(ctx: BotContext, query: string, signal?: AbortSignal): Promise<string | null> {
+  const pages = await searchTavily(query, {}, signal);
 
   if (pages.length === 0) {
     await ctx.reply(
@@ -1631,6 +1696,7 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
       extraInstruction: NEWS_DIGEST_RULE,
       // Свой таймаут: см. config.ai.webTimeoutMs — запрос сюда тяжелее обычного.
       timeoutMs: config.ai.webTimeoutMs,
+      signal,
     });
   } catch (error) {
     const timedOut = error instanceof ProviderRequestError && error.kind === 'timeout';
@@ -1642,6 +1708,7 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
       maxOutputTokens: config.ai.webDigestMaxOutputTokens,
       extraInstruction: NEWS_DIGEST_RULE,
       timeoutMs: config.ai.webTimeoutMs,
+      signal,
     });
   }
 
@@ -1661,6 +1728,7 @@ async function searchWithTavily(ctx: BotContext, query: string): Promise<string 
     maxOutputTokens: Math.max(config.ai.webFinalMaxOutputTokens, OPENROUTER_OUTPUT_FLOOR),
     extraInstruction: newsFinalRule(Math.max(charBudget, 0)),
     timeoutMs: config.ai.webTimeoutMs,
+    signal,
   });
 
   await sendWebAnswer(ctx, answer.text, links);
@@ -2505,6 +2573,40 @@ export function registerAiCommands(bot: Bot<BotContext>): void {
     clearTrackDraft(ctx);
     await ctx.answerCallbackQuery({ text: 'Отменено' });
     await ctx.editMessageText('✖️ Заказ отменён. Ничего не потрачено.');
+  });
+
+  // Кнопка «Отмена» под «думаю…»-уведомлениями («!размышление», «!сеть»).
+  // Роняет контроллер задачи — сигнал уже прокинут вниз до fetch, слои
+  // бросают kind 'cancelled', обработчики тихо уходят. Слот нормы
+  // возвращается здесь же и ровно один раз: запись удаляется первой,
+  // а обработчик свою ветку release для отмены пропускает.
+  bot.callbackQuery(new RegExp(`^${CANCEL_CB}:`), async (ctx) => {
+    const key = ctx.callbackQuery.data.slice(CANCEL_CB.length + 1);
+    const task = peekTask(key);
+
+    if (!task) {
+      await ctx.answerCallbackQuery({ text: 'Этот запрос уже завершён.' });
+      return;
+    }
+
+    if (task.userId !== undefined && ctx.from?.id !== task.userId) {
+      await ctx.answerCallbackQuery({ text: 'Это чужой запрос — отменить может только автор.' });
+      return;
+    }
+
+    takeTask(key);
+    task.controller.abort();
+    if (task.quota === 'deep') await deepQuota.release(task.userId);
+    else await webQuota.release(task.userId);
+    logger.info('Долгий запрос отменён кнопкой', { key, quota: task.quota, userId: task.userId });
+
+    await ctx.answerCallbackQuery({ text: 'Остановлено' });
+    const separator = key.lastIndexOf(':');
+    const chatId = Number(key.slice(0, separator));
+    const noticeId = Number(key.slice(separator + 1));
+    if (Number.isFinite(chatId) && Number.isFinite(noticeId)) {
+      await ctx.api.editMessageText(chatId, noticeId, '✖️ Остановлено. Слот нормы возвращён.').catch(() => undefined);
+    }
   });
 
   // ------------------------------------------------------- /gem и /гем

@@ -9,6 +9,7 @@
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { ProviderRequestError, type ProviderErrorKind, type TextGenerationOptions, type TextProvider } from '../types.js';
+import { withTimeoutSignal } from './cancel.js';
 
 /** Минимально необходимая часть ответа /chat/completions. */
 interface ChatCompletionResponse {
@@ -89,14 +90,22 @@ export class OpenAiCompatibleProvider implements TextProvider {
           max_tokens: options.maxOutputTokens ?? 2048,
         }),
         // AbortSignal.timeout доступен начиная с Node 18 — отдельная библиотека не нужна.
-        signal: AbortSignal.timeout(options.timeoutMs ?? config.ai.timeoutMs),
+        // Внешний сигнал (кнопка «Отмена») бьёт раньше таймаута: AbortSignal.any
+        // роняет fetch первым сработавшим, а имя ошибки различает кто именно.
+        signal: withTimeoutSignal(options.signal, options.timeoutMs ?? config.ai.timeoutMs),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // AbortSignal.timeout бросает TimeoutError — помечаем честно, чтобы
       // фолбэк второго уровня его НЕ подхватывал (иначе ждали бы дважды).
+      // Внешняя отмена (AbortError) — kind 'cancelled': цепочки его
+      // не перебирают и человеку его не показывают (см. cancel.ts).
       const kind: ProviderErrorKind =
-        error instanceof Error && error.name === 'TimeoutError' ? 'timeout' : 'unknown';
+        error instanceof Error && error.name === 'TimeoutError'
+          ? 'timeout'
+          : error instanceof Error && error.name === 'AbortError'
+            ? 'cancelled'
+            : 'unknown';
       throw new ProviderRequestError(this.id, `Сеть недоступна или запрос прерван: ${message}`, { cause: error, kind });
     }
 

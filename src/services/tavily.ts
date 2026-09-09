@@ -19,6 +19,7 @@
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { ProviderRequestError } from '../types.js';
+import { withTimeoutSignal } from './cancel.js';
 
 /** Одна найденная страница. */
 export interface WebPage {
@@ -92,7 +93,7 @@ function pageText(snippet: string | undefined, raw: string | null | undefined, l
  * Ищет страницы по запросу. Пустой список — это не ошибка, а «ничего
  * не нашлось»: решать, что с этим делать, вызывающему коду.
  */
-export async function searchTavily(query: string, options: SearchOptions = {}): Promise<WebPage[]> {
+export async function searchTavily(query: string, options: SearchOptions = {}, signal?: AbortSignal): Promise<WebPage[]> {
   if (!isTavilyConfigured()) {
     throw new ProviderRequestError('tavily', TAVILY_SETUP_HINT, { kind: 'auth' });
   }
@@ -128,13 +129,16 @@ export async function searchTavily(query: string, options: SearchOptions = {}): 
         // одних выжимок на это не хватает (см. config.tavily.pageChars).
         ...(pageChars > 0 ? { include_raw_content: true } : {}),
       }),
-      signal: AbortSignal.timeout(config.ai.timeoutMs),
+      signal: withTimeoutSignal(signal, config.ai.timeoutMs),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    // Внешняя отмена (кнопка под «думаю…») — честный kind, а не 'server':
+    // иначе «!сеть» показала бы ошибку вместо тихого «Остановлено».
+    const cancelled = error instanceof Error && error.name === 'AbortError';
     throw new ProviderRequestError('tavily', `Не удалось связаться с Tavily: ${message}`, {
       cause: error,
-      kind: 'server',
+      kind: cancelled ? 'cancelled' : 'server',
     });
   }
 
