@@ -73,7 +73,7 @@ async function saveNotes(key: string, lines: string[]): Promise<void> {
 export function parseNotesLines(text: string, maxLines: number, maxLineChars: number): string[] {
   return text
     .split('\n')
-    .map((line) => line.replace(/^[\s\-*•▪\d.)]+/, '').trim())
+    .map((line) => line.replace(/^[\s\-*•·\d.)]+/, '').trim())
     .filter((line) => line.length > 0)
     .slice(0, Math.max(maxLines, 0))
     .map((line) => line.slice(0, Math.max(maxLineChars, 0)))

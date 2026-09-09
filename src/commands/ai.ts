@@ -86,6 +86,102 @@ import {
 const GEMINI_ID = 'gemini';
 
 /**
+ * Шутливые заглушки на время генерации обычного ответа («/гем вопрос»).
+ * Выбор — `Math.random`, без обращения к нейросети (0 токенов).
+ *
+ * Сознательное исключение из стиля «без смайлов» (см. 3f1cfe3): владелец
+ * явно заказал смайлики именно в заглушке. Ответы остаются без смайлов.
+ */
+const THINKING_PLACEHOLDERS = [
+  'Педалирую… 🚴',
+  'Калькулирую… 🧮',
+  'Дискобомбулирую… 🪩',
+  'Шестерёнюсь… ⚙️',
+  'Нейроню… 🧠',
+  'Синапсю… ⚡',
+  'Гугляю в астрале… 🔮',
+  'Кипячу чайник… 🫖',
+  'Шуршу извилинами… 🍃',
+  'Барабаню по клавишам… 🥁',
+  'Полирую ответ… ✨',
+  'Замешиваю смыслы… 🥣',
+  'Грею лампы… 💡',
+  'Тарахчу процессором… 🛵',
+  'Воркую с весами… 🕊️',
+  'Хрущу попкорном… 🍿',
+  'Натираю хрустальный шар… 🔮',
+  'Жонглирую токенами… 🤹',
+  'Дую на видеокарту… 🌬️',
+  'Сдуваю пыль с мануалов… 📚',
+  'Варю кофе для нейронов… ☕',
+  'Ловлю мысль сачком… 🦋',
+  'Стучу по бубну… 🪘',
+  'Раскладываю таро из логов… 🃏',
+  'Чешу затылок… 🤔',
+  'Разминаю пальцы… 🤸',
+  'Шепчусь с сервером… 🤫',
+  'Достаю ответ с антресолей… 🪜',
+  'Гадаю на кофейной гуще… ☕',
+  'Зову музу… 🎭',
+] as const;
+
+/** Индекс прошлой заглушки — чтобы не повторяться дважды подряд. */
+let lastPlaceholderIndex = -1;
+
+/** Случайная заглушка из списка (см. THINKING_PLACEHOLDERS). */
+function pickThinkingPlaceholder(): string {
+  const count = THINKING_PLACEHOLDERS.length;
+  let index = Math.floor(Math.random() * count);
+  if (index === lastPlaceholderIndex) index = (index + 1) % count;
+  lastPlaceholderIndex = index;
+  return THINKING_PLACEHOLDERS[index]!;
+}
+
+/** Куда править ответ/ошибку вместо нового сообщения: отправленная заглушка. */
+interface PlaceholderRef {
+  chatId: number;
+  messageId: number;
+}
+
+/**
+ * Отправляет заглушку реплаем на вопрос (тем же ctx.reply, что и сам ответ, —
+ * реплай и топик подставляет middleware reply.ts). Разметки нет, plain text.
+ * Неудача — не повод отменять ответ: возвращаем undefined, дальше как без неё.
+ */
+async function sendThinkingPlaceholder(ctx: BotContext): Promise<PlaceholderRef | undefined> {
+  try {
+    const notice = await ctx.reply(pickThinkingPlaceholder());
+    return { chatId: notice.chat.id, messageId: notice.message_id };
+  } catch (error) {
+    logger.warn('Не удалось отправить заглушку, отвечаю без неё', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return undefined;
+  }
+}
+
+/**
+ * Как часто менять текст заглушки, пока модель думает. 4 с — реже, чем
+ * Telegram гасит «печатает…» (5 с), но достаточно часто, чтобы было видно
+ * движение; лимиты на editMessageText при таком интервале не задеваем.
+ */
+const PLACEHOLDER_ROTATE_MS = 4000;
+
+/**
+ * Периодически меняет текст уже отправленной заглушки на случайный новый.
+ * Выбор — `Math.random`, к нейросети не ходим (0 токенов): это чисто
+ * локальные строки + вызовы Telegram editMessageText.
+ * Возвращает функцию остановки — её обязательно вызвать до того, как
+ * заглушка будет заменена ответом/ошибкой или удалена.
+ */
+function startPlaceholderRotation(ctx: BotContext, target: PlaceholderRef): () => void {
+  const timer = setInterval(() => {
+    void ctx.api.editMessageText(target.chatId, target.messageId, pickThinkingPlaceholder()).catch(() => undefined);
+  }, PLACEHOLDER_ROTATE_MS);
+  return () => clearInterval(timer);
+}
+
+/**
  * Незавершённый заказ трека: план показан, деньги ещё не потрачены.
  * Живёт в сессии раздела, по одному на человека — как черновики рисования
  * (см. DrawDraft в types.ts и src/commands/draw.ts).
@@ -431,9 +527,26 @@ const VOICE_DEFAULT_TASK =
   'Если это не вопрос, а просто реплика, отзовись на неё коротко и по делу.';
 
 /** Единая обработка ошибок нейросетей: пользователю — подсказка, в лог — детали. */
-async function replyWithError(ctx: BotContext, error: unknown): Promise<void> {
+async function replyWithError(ctx: BotContext, error: unknown, editTarget?: PlaceholderRef): Promise<void> {
+  // Если заглушка уже в чате — заменяем её тем же текстом (edit), а не шлём
+  // новое сообщение: мусора быть не должно, и висеть заглушка не должна.
+  const send = async (text: string): Promise<void> => {
+    if (!editTarget) {
+      await ctx.reply(text);
+      return;
+    }
+    try {
+      await ctx.api.editMessageText(editTarget.chatId, editTarget.messageId, text);
+    } catch (editError) {
+      logger.warn('Не удалось заменить заглушку текстом ошибки, отправляю обычным сообщением', {
+        error: editError instanceof Error ? editError.message : String(editError),
+      });
+      await ctx.reply(text);
+    }
+  };
+
   if (error instanceof ProviderNotConfiguredError) {
-    await ctx.reply(
+    await send(
       ['🔌 Нейросеть не подключена. Чтобы включить её, добавьте ключи в .env:', '', ...error.hints.map((hint) => '• ' + hint)].join(
         '\n',
       ),
@@ -443,14 +556,14 @@ async function replyWithError(ctx: BotContext, error: unknown): Promise<void> {
 
   if (error instanceof ProviderRequestError) {
     logger.warn('Ошибка провайдера', { provider: error.provider, message: error.message });
-    await ctx.reply(`⚠️ ${error.message}`);
+    await send(`⚠️ ${error.message}`);
     return;
   }
 
   logger.error('Непредвиденная ошибка при обращении к нейросети', {
     error: error instanceof Error ? error.message : String(error),
   });
-  await ctx.reply('😔 Что-то пошло не так. Попробуйте ещё раз чуть позже.');
+  await send('😔 Что-то пошло не так. Попробуйте ещё раз чуть позже.');
 }
 
 /**
@@ -461,10 +574,46 @@ async function replyWithError(ctx: BotContext, error: unknown): Promise<void> {
  * не принял разметку, повторяем отправку обычным текстом: пользователь
  * должен получить ответ в любом случае.
  */
-async function sendMarkdown(ctx: BotContext, markdown: string): Promise<void> {
+async function sendMarkdown(ctx: BotContext, markdown: string, editTarget?: PlaceholderRef): Promise<void> {
+  let isFirst = true;
   for (const chunk of splitMarkdown(markdown)) {
+    const html = markdownToTelegramHtml(chunk);
+    // Первый кусок заменяет заглушку (edit), остальные — обычные сообщения.
+    if (isFirst && editTarget) {
+      isFirst = false;
+      try {
+        await ctx.api.editMessageText(editTarget.chatId, editTarget.messageId, html, {
+          parse_mode: 'HTML',
+          link_preview_options: { is_disabled: true },
+        });
+        continue;
+      } catch (error) {
+        const isMarkupError =
+          error instanceof GrammyError && /parse entities|unsupported start tag|can't find end/i.test(error.description);
+
+        if (isMarkupError) {
+          logger.warn('Telegram отклонил разметку, отправляю обычным текстом', {
+            description: error.description,
+          });
+          await ctx.api
+            .editMessageText(editTarget.chatId, editTarget.messageId, chunk, {
+              link_preview_options: { is_disabled: true },
+            })
+            .catch(async () => {
+              await ctx.reply(chunk, { link_preview_options: { is_disabled: true } });
+            });
+          continue;
+        }
+
+        logger.warn('Не удалось заменить заглушку ответом, отправляю обычным сообщением', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    } else {
+      isFirst = false;
+    }
     try {
-      await ctx.reply(markdownToTelegramHtml(chunk), {
+      await ctx.reply(html, {
         parse_mode: 'HTML',
         link_preview_options: { is_disabled: true },
       });
@@ -506,13 +655,18 @@ function takeHistory(history: ChatMessage[], limit: number): ChatMessage[] {
  * Дословная выписка голосового — исключение: её резать нельзя («покороче»
  * означало бы «перескажи»), поэтому она едет несколькими сообщениями подряд.
  */
-async function sendAnswer(ctx: BotContext, text: string, options: { allowLong?: boolean } = {}): Promise<void> {
+async function sendAnswer(
+  ctx: BotContext,
+  text: string,
+  options: { allowLong?: boolean } = {},
+  editTarget?: PlaceholderRef,
+): Promise<void> {
   if (options.allowLong) {
-    await sendMarkdown(ctx, text);
+    await sendMarkdown(ctx, text, editTarget);
     return;
   }
 
-  await sendMarkdown(ctx, trimToLimit(text, MESSAGE_LIMIT));
+  await sendMarkdown(ctx, trimToLimit(text, MESSAGE_LIMIT), editTarget);
 }
 
 /**
@@ -544,6 +698,12 @@ interface AskOptions {
    * и sendAnswer): файлов у него нет.
    */
   answerLength?: AnswerLength;
+  /**
+   * Показать шутливую заглушку на время генерации (см. THINKING_PLACEHOLDERS):
+   * только обычный текстовый путь «/гем вопрос». Остальные ветки либо отвечают
+   * мгновенно, либо уже имеют свои notice — им заглушка не нужна.
+   */
+  thinkingPlaceholder?: boolean;
 }
 
 /**
@@ -565,7 +725,7 @@ async function askChain(
   /** Цепочка целиком: из неё берутся и модели, и потолок ответа. */
   chain: ChainInfo,
   prompt: string,
-  { attachments = [], historyText, asFile, answerLength }: AskOptions = {},
+  { attachments = [], historyText, asFile, answerLength, thinkingPlaceholder = false }: AskOptions = {},
 ): Promise<boolean> {
   /**
    * О длине с моделью договариваются здесь для любого ответа в чат:
@@ -617,6 +777,7 @@ async function askChain(
         `и список моделей ниже, ничего не выдумывай.`
       : undefined,
   ].filter(Boolean);
+  let placeholder: PlaceholderRef | undefined;
   try {
     // Историю передаём укороченной, и это не то же самое, сколько её хранить:
     // в сессии лежит память раздела на дни, а модели нужен разговор, а не архив
@@ -644,18 +805,35 @@ async function askChain(
         ? `Модели, которые могут отвечать в этом чате: ${candidates.join(', ')}.`
         : undefined,
     ].filter(Boolean);
-    const answer = await withChatAction(ctx, asFile ? 'upload_document' : 'typing', () =>
-      generateWithFallback(levels, prompt, {
-        history,
-        attachments,
-        // Потолок ответа: у цепочки свой (он упирается в минутную норму
-        // её моделей), файловый ещё выше — его берут там, где длину задаёт
-        // задача, а не размер сообщения. Явный потолок сильнее уровневых
-        // (см. generateWithFallback): файл одинаково огромен на обоих уровнях.
-        ...(asFile || length === 'unbounded' ? { maxOutputTokens: config.files.answerMaxOutputTokens } : {}),
-        ...(allRules.length > 0 ? { extraInstruction: allRules.join(' ') } : {}),
-      }),
-    );
+    // Заглушка уходит в чат до долгой генерации и живёт параллельно
+    // с «печатает…» (withChatAction ниже остаётся как есть — не мешает).
+    // Текст заглушки каждые PLACEHOLDER_ROTATE_MS случайно меняется, пока
+    // модель думает; таймер обязательно гасим до замены заглушки ответом.
+    let stopRotation: (() => void) | undefined;
+    if (thinkingPlaceholder) {
+      placeholder = await sendThinkingPlaceholder(ctx);
+      if (placeholder) {
+        const target: PlaceholderRef = placeholder;
+        stopRotation = startPlaceholderRotation(ctx, target);
+      }
+    }
+    let answer;
+    try {
+      answer = await withChatAction(ctx, asFile ? 'upload_document' : 'typing', () =>
+        generateWithFallback(levels, prompt, {
+          history,
+          attachments,
+          // Потолок ответа: у цепочки свой (он упирается в минутную норму
+          // её моделей), файловый ещё выше — его берут там, где длину задаёт
+          // задача, а не размер сообщения. Явный потолок сильнее уровневых
+          // (см. generateWithFallback): файл одинаково огромен на обоих уровнях.
+          ...(asFile || length === 'unbounded' ? { maxOutputTokens: config.files.answerMaxOutputTokens } : {}),
+          ...(allRules.length > 0 ? { extraInstruction: allRules.join(' ') } : {}),
+        }),
+      );
+    } finally {
+      stopRotation?.();
+    }
 
     if (config.ai.historyMaxTokens > 0) {
       // В историю попадает только текст: картинки повторно не пересылаются,
@@ -683,9 +861,12 @@ async function askChain(
     }
 
     if (asFile) {
+      // Сюда с заглушкой не ходят (только обычный текст), но висеть ей нельзя:
+      // файл через edit не отправить, поэтому убираем и шлём файл как обычно.
+      if (placeholder) await ctx.api.deleteMessage(placeholder.chatId, placeholder.messageId).catch(() => undefined);
       await sendAnswerAsFile(ctx, answer.text, asFile, historyText ?? prompt);
     } else {
-      await sendAnswer(ctx, answer.text, { allowLong: length === 'unbounded' });
+      await sendAnswer(ctx, answer.text, { allowLong: length === 'unbounded' }, placeholder);
     }
 
     if (answer.skipped.length > 0) {
@@ -702,7 +883,7 @@ async function askChain(
 
     return true;
   } catch (error) {
-    await replyWithError(ctx, error);
+    await replyWithError(ctx, error, placeholder);
     return false;
   }
 }
@@ -947,10 +1128,13 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
 
   const chain = resolveChain(SMART_CHAIN);
   // Ответ всегда одним сообщением в чат (см. sendAnswer): файлов у обычных вопросов нет.
+  // Только сюда вешаем шутливую заглушку: все мгновенные ветки и ветки
+  // со своими notice (файлы, трек, войс, draw, !лимиты и т.д.) возвращаются выше.
   const answered = await askChain(ctx, gemini, chain, promptWithQuote, {
     // В историю — чистый вопрос, без цитаты: та либо и так уже в истории
     // (если цитировали недавний ответ бота), либо разово нужна только модели.
     historyText: prompt,
+    thinkingPlaceholder: true,
   });
 
   // Запрос начался со слова-переключателя, но без «!». Отвечаем как на обычный
@@ -1102,7 +1286,7 @@ function buildNewsFinalPrompt(query: string, digest: string): string {
  * (++слово++ → <u>) — только при реальной необходимости, из эмодзи — только 📰
  * в заголовке (других смайлов модель не ставит: цветные и тяжёлые).
  * Из разметки модели разрешены только **жирный**, ++подчёркивание++ и пункты
- * на ▪ (дефис тоже сойдёт — конвертер сделает из него •): решётки, таблицы,
+ * на · (дефис тоже сойдёт — конвертер сделает из него ·): решётки, таблицы,
  * цитаты и код в чате выглядят мусором, а не стилем.
  *
  * Свой список источников модели запрещают не из вредности: бот дописывает
@@ -1127,14 +1311,14 @@ function newsFinalRule(charBudget: number): string {
     'Оформи ответ как карточку новостного агентства, строго в таком порядке:',
     '1) первая строка — эмодзи 📰 плюс **жирный заголовок**: суть плюс короткая дата (например, «📰 **Йошкар-Ола: перекрытия и фестиваль · 9 сентября**»);',
     '2) дальше лид — прямой ответ на вопрос в двух-трёх строках обычным текстом;',
-    '3) затем строка **Главное** и 3–6 коротких пунктов, каждый с новой строки начинается с символа ▪ — по одному факту в пункте;',
+    '3) затем строка **Главное** и 3–6 коротких пунктов, каждый с новой строки начинается с символа · — по одному факту в пункте;',
     '4) если фактам нужен контекст или связь между ними — блок из строки **Контекст** и одного-двух предложений после списка.',
     'Каждый блок отделяй пустой строкой: заголовок, лид, строка **Главное**, список, блок **Контекст** —',
     'всё через пустую строку, иначе текст слипнется в простыню.',
     'Жирный — только заголовок и слова Главное/Контекст, больше нигде. Подчёркивания (++плюсы++) — только при реальной необходимости (без выделения смысл теряется): максимум 1–2 слова на весь ответ, чаще — вообще без них.',
     '*Курсив* — редко и только для названий, не для выделения важного.',
     'Эмодзи: 📰 в первой строке и 🔗 у источников — свои, плюс максимум один цветной по настроению новости. Больше смайликов не ставь, не в каждое сообщение они нужны.',
-    'Разметка — только **жирный**, ++подчёркивание++ и пункты на ▪: без решёток, таблиц, цитат, кода и разделителей.',
+    'Разметка — только **жирный**, ++подчёркивание++ и пункты на ·: без решёток, таблиц, цитат, кода и разделителей.',
     `Длина ответа — строго ${min}–${charBudget} знаков: это почти всё сообщение Telegram,`,
     'остаток займёт список источников, который допишет бот сам. Меньше — мало по такому',
     'объёму материала, больше не влезет в сообщение и будет обрезано.',
@@ -1154,7 +1338,7 @@ function buildSearchPrompt(query: string, pages: WebPage[]): string {
 /** Второе сообщение ответа поиска: ссылки на источники. */
 function sourcesBlock(links: string[]): string {
   if (links.length === 0) return '';
-  return `🔗 **Источники:**\n${links.map((link) => `▪ ${link}`).join('\n')}`;
+  return `🔗 **Источники:**\n${links.map((link) => `· ${link}`).join('\n')}`;
 }
 
 /**
