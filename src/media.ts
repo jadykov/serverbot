@@ -73,6 +73,16 @@ export async function downloadAttachment(
 
   const data = Buffer.from(await response.arrayBuffer());
 
+  // file_size в апдейте бывает не всегда (рядовой случай — фото через getFile):
+  // тогда отсекаем переростка после скачивания, до отправки в модель.
+  if (data.length > MAX_FILE_BYTES) {
+    throw new ProviderRequestError(
+      'telegram',
+      `Файл слишком большой (${Math.round(data.length / 1024 / 1024)} МБ). ` +
+        'Боты не могут скачивать файлы больше 20 МБ — это ограничение Telegram, а не бота.',
+    );
+  }
+
   logger.debug('Файл скачан из Telegram', { bytes: data.length, path: file.file_path });
 
   return { data, mimeType: mimeHint ?? detectImageMime(data) };

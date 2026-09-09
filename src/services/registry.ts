@@ -97,7 +97,7 @@ export async function generateWithFallback(
   options: TextGenerationOptions = {},
 ): Promise<ChainAnswer> {
   const skipped: string[] = [];
-  let lastError: ProviderRequestError | undefined;
+  let lastError: unknown;
 
   for (const level of levels) {
     if (!level.provider.isConfigured || level.models.length === 0) continue;
@@ -114,7 +114,9 @@ export async function generateWithFallback(
       const kind = error instanceof ProviderRequestError ? error.kind : 'unknown';
       // Неперебираемый отказ — дальше будет то же самое (или дольше).
       if (error instanceof ProviderRequestError && !RETRYABLE.has(kind) && kind !== 'unknown') throw error;
-      lastError = error instanceof ProviderRequestError ? error : undefined;
+      // Непредвиденное (баг SDK, TypeError и т.п.) — не маскируем под
+      // «не подключена»: исходная ошибка должна дойти до replyWithError.
+      lastError = error;
       skipped.push(...level.models);
       logger.warn('Уровень цепочки отказал целиком, ухожу на следующий', {
         provider: level.provider.id,

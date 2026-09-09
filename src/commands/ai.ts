@@ -136,6 +136,13 @@ const THINKING_PLACEHOLDERS = [
 /** Индекс прошлой заглушки — чтобы не повторяться дважды подряд. */
 let lastPlaceholderIndex = -1;
 
+/**
+ * Заказы трека в полёте по ключу «чат:человек» — та же защита от дабл-тапа,
+ * что drawingNow в draw.ts: два быстрых «Заказать» иначе дали бы два платных
+ * generateTrack с двойным списанием нормы.
+ */
+const orderingTrackNow = new Set<string>();
+
 /** Случайная заглушка из списка (см. THINKING_PLACEHOLDERS). */
 function pickThinkingPlaceholder(): string {
   const count = THINKING_PLACEHOLDERS.length;
@@ -530,6 +537,8 @@ async function replyWithError(ctx: BotContext, error: unknown, editTarget?: Plac
         error: editError instanceof Error ? editError.message : String(editError),
       });
       await ctx.reply(text);
+      // Раз edit не удался, заглушка иначе висела бы вечно — убираем best-effort.
+      await ctx.api.deleteMessage(editTarget.chatId, editTarget.messageId).catch(() => undefined);
     }
   };
 
@@ -589,6 +598,8 @@ async function sendMarkdown(ctx: BotContext, markdown: string, editTarget?: Plac
             })
             .catch(async () => {
               await ctx.reply(chunk, { link_preview_options: { is_disabled: true } });
+              // Заглушку убираем best-effort, иначе висит призраком рядом с ответом.
+              await ctx.api.deleteMessage(editTarget.chatId, editTarget.messageId).catch(() => undefined);
             });
           continue;
         }
@@ -596,6 +607,8 @@ async function sendMarkdown(ctx: BotContext, markdown: string, editTarget?: Plac
         logger.warn('Не удалось заменить заглушку ответом, отправляю обычным сообщением', {
           error: error instanceof Error ? error.message : String(error),
         });
+        // Заглушку убираем best-effort, иначе она висит призраком рядом с ушедшим ответом.
+        await ctx.api.deleteMessage(editTarget.chatId, editTarget.messageId).catch(() => undefined);
       }
     } else {
       isFirst = false;
@@ -809,6 +822,13 @@ async function askChain(
       }),
     );
 
+    // Пустой ответ — не ответ: в историю, поиск и digest ему нельзя (там он
+    // мусором), а молча глотать нельзя тоже. kind 'server' — перебираемый,
+    // следующий уровень/резервная модель ещё может ответить.
+    if (!answer.text.trim()) {
+      throw new ProviderRequestError(provider.id, 'Модель вернула пустой ответ.', { kind: 'server' });
+    }
+
     if (config.ai.historyMaxTokens > 0) {
       // В историю попадает только текст: картинки повторно не пересылаются,
       // иначе каждый следующий вопрос тащил бы за собой все прежние вложения.
@@ -909,12 +929,15 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   // и реплай при ней означает «вот этот человек», а не «вот этот файл».
   const reset = RESET_PREFIX.exec(trimmed);
   if (reset) {
+    // Слот — до ответа: брось reply — слот уже возвращён, утечки нет.
+    await messagesQuota.release(ctx.from?.id);
     await handleResetUser(ctx, reset[1] ?? '');
     return;
   }
 
   // «!лимиты» — тоже служебная и тоже без аргументов, реплай ей не нужен.
   if (LIMITS_PREFIX.test(trimmed)) {
+    await messagesQuota.release(ctx.from?.id);
     await handleLimits(ctx);
     return;
   }
@@ -923,6 +946,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   // и что там внутри — файл, снимок или текст — совершенно неважно. Иначе
   // реплай на документ утащил бы handleDocument, а на фото — разбор снимка.
   if (DM_PREFIX.test(trimmed)) {
+    await messagesQuota.release(ctx.from?.id);
     await handleSendToDm(ctx);
     return;
   }
@@ -977,6 +1001,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   // в лицо (он ждёт свежие данные, а получает «в файле ничего нет»).
   // Поэтому сразу объясняем, а не делаем вид, что поискали.
   if (repliedDocument && WEB_PREFIX.test(trimmed)) {
+    await messagesQuota.release(ctx.from?.id);
     await ctx.reply(
       '«!сеть» реплаем на файл не работает: она ищет по интернету, а не по документу.\n\n' +
         'Спросите отдельным сообщением: <code>/гем !сеть ваш вопрос</code>.',
@@ -1006,6 +1031,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   }
 
   if (!rawPrompt) {
+    await messagesQuota.release(ctx.from?.id);
     await ctx.reply(
       'Напишите запрос после команды. Например:\n' +
         '<code>/гем объясни рекурсию за три предложения</code>\n\n' +
@@ -1026,6 +1052,7 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   // «!расшифруй» и «!ответь» без голосового: слушать нечего. Молча ответить
   // текстом было бы хуже всего — человек решит, что бот записи не слышит в принципе.
   if (voiceWord || answerWord) {
+    await messagesQuota.release(ctx.from?.id);
     await ctx.reply(
       '«!расшифруй» и «!ответь» работают по голосовому: ответьте командой на голосовое сообщение — ' +
         'первая выпишет дословно, вторая ответит по смыслу.\n\n' +
@@ -1087,7 +1114,11 @@ async function handleGemini(ctx: BotContext, rawPrompt: string): Promise<void> {
   const prompt = rawPrompt;
 
   const gemini = await requireGemini(ctx);
-  if (!gemini) return;
+  // Обычная ветка: слот сообщений тут и тратится, при отказе провайдера — возврат.
+  if (!gemini) {
+    await messagesQuota.release(ctx.from?.id);
+    return;
+  }
 
   /**
    * Реплай на текстовое сообщение вместе со своим вопросом: «/гем как тебе
@@ -1155,6 +1186,7 @@ function formatWhen(ts: number): string {
  */
 async function handleSearch(ctx: BotContext, query: string): Promise<void> {
   if (!query) {
+    await messagesQuota.release(ctx.from?.id);
     await ctx.reply(
       'Напишите, что искать:\n<code>/гем найди где мы обсуждали деплой</code>\n\n' +
         'Я ищу по смыслу, а не по точным словам, и только по этому разделу.',
@@ -1164,12 +1196,16 @@ async function handleSearch(ctx: BotContext, query: string): Promise<void> {
   }
 
   if (!config.search.enabled) {
+    await messagesQuota.release(ctx.from?.id);
     await ctx.reply('🔍 Поиск по переписке выключен (SEARCH_ENABLED=false).');
     return;
   }
 
   const key = sessionKey(ctx);
-  if (!key) return;
+  if (!key) {
+    await messagesQuota.release(ctx.from?.id);
+    return;
+  }
 
   try {
     const hits = await withChatAction(ctx, 'typing', () => searchMessages(key, query));
@@ -1395,6 +1431,10 @@ function sourceLink(title: string, url: string): string {
  * со стороны не было.
  */
 async function handleDeep(ctx: BotContext, question: string): Promise<void> {
+  // Платная ветка со своей нормой: слот сообщений (50/день — только обычной
+  // ветке разговорного чата) возвращаем сразу, дальше считает deepQuota.
+  await messagesQuota.release(ctx.from?.id);
+
   if (!isDeepThinkConfigured()) {
     await ctx.reply(`🔌 Размышление не подключено. ${DEEP_SETUP_HINT}`);
     return;
@@ -1551,6 +1591,10 @@ async function handleDeep(ctx: BotContext, question: string): Promise<void> {
  * пока отключён — модуль остался в коде, но handleWeb его не вызывает.
  */
 async function handleWeb(ctx: BotContext, query: string): Promise<void> {
+  // Платная ветка со своей нормой: слот сообщений возвращаем сразу,
+  // дальше считает webQuota.
+  await messagesQuota.release(ctx.from?.id);
+
   if (!isTavilyConfigured()) {
     await ctx.reply(`🔌 Живой поиск не подключён. ${TAVILY_SETUP_HINT}`);
     return;
@@ -1585,21 +1629,27 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
   // как в «!размышлении»: иначе молчание читается как поломка. Сообщение
   // удаляется, когда ответ и источники уже в чате (см. finally ниже).
   // Под уведомлением — кнопка «Отмена», сигнал едет в searchWithTavily.
-  // Объявления — наружу из try: finally const из try не видит.
+  // Всё — внутри try: падение reply/edit до резерва слот вернул бы, а после
+  // резерва обязано вести в catch с release, иначе слот утекает.
   let cancelKey = '';
   let controller: AbortController | undefined = undefined;
-  const notice = await ctx.reply(
-    '🤔 Ищу в сети свежие страницы — это займёт полминуты…\n\n' + 'Передумали — жмите «Отмена» под этим сообщением.',
-  );
-  cancelKey = taskKey(notice.chat.id, notice.message_id);
-  controller = registerTask(cancelKey, userId, 'web');
-  // Сигнал — в локальный const: замыкание ниже сбросило бы сужение let.
-  const signal = controller.signal;
-  await ctx.api
-    .editMessageReplyMarkup(notice.chat.id, notice.message_id, { reply_markup: cancelKeyboard(cancelKey) })
-    .catch(() => undefined);
+  let noticeChatId = 0;
+  let noticeMessageId = 0;
 
   try {
+    const notice = await ctx.reply(
+      '🤔 Ищу в сети свежие страницы — это займёт полминуты…\n\n' + 'Передумали — жмите «Отмена» под этим сообщением.',
+    );
+    noticeChatId = notice.chat.id;
+    noticeMessageId = notice.message_id;
+    cancelKey = taskKey(notice.chat.id, notice.message_id);
+    controller = registerTask(cancelKey, userId, 'web');
+    // Сигнал — в локальный const: замыкание ниже сбросило бы сужение let.
+    const signal = controller.signal;
+    await ctx.api
+      .editMessageReplyMarkup(notice.chat.id, notice.message_id, { reply_markup: cancelKeyboard(cancelKey) })
+      .catch(() => undefined);
+
     const answered = await withChatAction(ctx, 'typing', () => searchWithTavily(ctx, query, signal));
 
     // Кнопку нажали, пока искал: запись уже забрана, слот возвращён,
@@ -1630,9 +1680,10 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
   } finally {
     takeTask(cancelKey);
     // Отменённое уведомление уже говорит «Остановлено» — его оставляем,
-    // остальное удаляем, как раньше.
-    if (!controller?.signal.aborted) {
-      await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
+    // остальное удаляем, как раньше. noticeMessageId пуст, если reply упал
+    // раньше отправки, — удалять тогда нечего.
+    if (noticeMessageId !== 0 && !controller?.signal.aborted) {
+      await ctx.api.deleteMessage(noticeChatId, noticeMessageId).catch(() => undefined);
     }
   }
 }
@@ -1938,6 +1989,10 @@ async function handleSendToDm(ctx: BotContext): Promise<void> {
 const VOICE_SPEC = /^\s*[«"'“]([^«»"'”]{1,60})[»"'”]\s*([\s\S]*)$/;
 
 async function handleSpeak(ctx: BotContext, request: string): Promise<void> {
+  // Платная ветка со своей нормой: слот сообщений возвращаем сразу,
+  // дальше считает ttsQuota.
+  await messagesQuota.release(ctx.from?.id);
+
   // Голос и манера, если их заказали кавычками в начале.
   const spec = VOICE_SPEC.exec(request);
   let voiceRequest: VoiceRequest = spec ? parseVoiceRequest(spec[1] ?? '') : {};
@@ -2080,6 +2135,10 @@ function humanizeLyrics(lyrics: string): string {
 }
 
 async function handleTrack(ctx: BotContext, request: string): Promise<void> {
+  // Платная ветка со своей нормой: слот сообщений возвращаем сразу
+  // (покрывает и ветку «музыка не подключена» ниже), дальше считает trackQuota.
+  await messagesQuota.release(ctx.from?.id);
+
   if (!isMusicConfigured()) {
     await ctx.reply(`🔌 Музыка не подключена. ${MUSIC_SETUP_HINT}`);
     return;
@@ -2235,11 +2294,13 @@ async function orderTrack(ctx: BotContext, draft: TrackDraft): Promise<void> {
     return;
   }
 
-  await ctx.editMessageText(await trackConfirmText(ctx, draft, true), {
-    parse_mode: 'HTML',
-  });
-
   try {
+    // Подтверждение переводим в «пишу…» до долгого ожидания: упади edit —
+    // уходим в catch с release, а не с занятым слотом.
+    await ctx.editMessageText(await trackConfirmText(ctx, draft, true), {
+      parse_mode: 'HTML',
+    });
+
     const track = await withChatAction(ctx, 'upload_document', () =>
       generateTrack({
         stylePrompt: draft.stylePrompt,
@@ -2273,8 +2334,11 @@ async function orderTrack(ctx: BotContext, draft: TrackDraft): Promise<void> {
     // в очереди не стоит ничего. Черновик оставляем и возвращаем кнопки —
     // можно попробовать ещё раз без нового плана.
     await trackQuota.release(userId);
+    // Текст подтверждения собирается через peek — может бросить сам; тогда
+    // уходим на глухую заглушку, но исходную ошибку всё равно показываем.
+    const confirm = await trackConfirmText(ctx, draft, false).catch(() => '⚠️ Не вышло заказать трек.');
     await ctx
-      .editMessageText(await trackConfirmText(ctx, draft, false), {
+      .editMessageText(confirm, {
         parse_mode: 'HTML',
         reply_markup: trackConfirmKeyboard(),
       })
@@ -2329,6 +2393,7 @@ function resolveImageRequest(
 async function handleRepliedPhoto(ctx: BotContext, fileId: string, rawPrompt: string): Promise<void> {
   const gemini = findTextProvider(GEMINI_ID);
   if (!gemini?.isConfigured) {
+    await messagesQuota.release(ctx.from?.id);
     await ctx.reply('🔌 Gemini не подключён — разбирать картинки некому.');
     return;
   }
@@ -2385,7 +2450,10 @@ function buildReplyQuotePrompt(
  */
 async function handleReplyToBot(ctx: BotContext, text: string, repliedMessage: QuotableMessage): Promise<void> {
   const gemini = await requireGemini(ctx);
-  if (!gemini) return;
+  if (!gemini) {
+    await messagesQuota.release(ctx.from?.id);
+    return;
+  }
 
   const prompt = buildReplyQuotePrompt(ctx, text, repliedMessage, 'ответ');
 
@@ -2405,10 +2473,17 @@ async function handleReplyToBot(ctx: BotContext, text: string, repliedMessage: Q
  */
 async function handleDocument(ctx: BotContext, fileId: string, fileName: string, caption: string): Promise<void> {
   const request = resolveImageRequest(ctx, caption);
-  if (!request) return;
+  // В группу без команды, чужому боту — модели нет, слот возвращаем.
+  if (!request) {
+    await messagesQuota.release(ctx.from?.id);
+    return;
+  }
 
   const gemini = await requireGemini(ctx);
-  if (!gemini) return;
+  if (!gemini) {
+    await messagesQuota.release(ctx.from?.id);
+    return;
+  }
 
   const notice = await ctx.reply(`📄 Читаю «${fileName}»…`);
 
@@ -2482,7 +2557,10 @@ async function handleVoice(ctx: BotContext, voice: VoiceMessage, question: strin
   const verbatim = question === VOICE_VERBATIM_TASK;
 
   const gemini = await requireGemini(ctx);
-  if (!gemini) return;
+  if (!gemini) {
+    await messagesQuota.release(ctx.from?.id);
+    return;
+  }
 
   const length = formatDuration(voice.duration ?? 0);
 
@@ -2532,10 +2610,15 @@ async function handleVoice(ctx: BotContext, voice: VoiceMessage, question: strin
 /** Скачивает картинки и отправляет их в модель вместе с вопросом. */
 async function handlePhotos(ctx: BotContext, fileIds: string[], caption: string): Promise<void> {
   const request = resolveImageRequest(ctx, caption);
-  if (!request) return;
+  // Альбом/фото без команды в группе — модели нет, слот возвращаем.
+  if (!request) {
+    await messagesQuota.release(ctx.from?.id);
+    return;
+  }
 
   const gemini = findTextProvider(GEMINI_ID);
   if (!gemini?.isConfigured) {
+    await messagesQuota.release(ctx.from?.id);
     await ctx.reply('🔌 Gemini не подключён — разбирать картинки некому.');
     return;
   }
@@ -2563,9 +2646,20 @@ export function registerAiCommands(bot: Bot<BotContext>): void {
       return;
     }
 
-    await ctx.answerCallbackQuery();
-    await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
-    await orderTrack(ctx, draft);
+    const inflightKey = sessionKey(ctx) ?? `${ctx.chat?.id ?? 0}:${ctx.from?.id ?? 0}`;
+    if (orderingTrackNow.has(inflightKey)) {
+      await ctx.answerCallbackQuery({ text: 'Уже заказываю — дождитесь результата.' });
+      return;
+    }
+    orderingTrackNow.add(inflightKey);
+
+    try {
+      await ctx.answerCallbackQuery();
+      await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
+      await orderTrack(ctx, draft);
+    } finally {
+      orderingTrackNow.delete(inflightKey);
+    }
   });
 
   bot.callbackQuery(`${TRACK_CB}:cancel`, async (ctx) => {
@@ -2652,7 +2746,13 @@ export function registerAiCommands(bot: Bot<BotContext>): void {
     const albumId = ctx.message.media_group_id;
 
     if (albumId) {
-      collectAlbumPart(ctx, albumId, fileId, caption, handlePhotos);
+      // Части альбома — отдельные апдейты, middleware занял слот на каждую,
+      // а ответ будет один: лишние возвращаем сразу. Если разбора не выйдет
+      // (нет команды), handlePhotos вернёт ещё один — итого ровно N.
+      collectAlbumPart(ctx, albumId, fileId, caption, (albumCtx, ids, cap) => {
+        for (let i = 1; i < ids.length; i++) void messagesQuota.release(albumCtx.from?.id);
+        return handlePhotos(albumCtx, ids, cap);
+      });
       return;
     }
 
@@ -2675,7 +2775,10 @@ export function registerAiCommands(bot: Bot<BotContext>): void {
   // эту ветку разбирает handleGemini.
   bot.on('message:voice', async (ctx) => {
     const request = resolveImageRequest(ctx, ctx.message.caption ?? '', '');
-    if (!request) return;
+    if (!request) {
+      await messagesQuota.release(ctx.from?.id);
+      return;
+    }
 
     await handleVoice(ctx, ctx.message.voice, request.prompt);
   });
@@ -2697,15 +2800,22 @@ export function registerAiCommands(bot: Bot<BotContext>): void {
 
     // В остальном в группах бот молчит на обычные сообщения: обращаться
     // к нему нужно командой. Иначе он вклинивался бы в каждую беседу.
-    if (ctx.chat.type !== 'private') return;
+    // Модели тут нет — занятый в middleware слот нормы возвращаем.
+    if (ctx.chat.type !== 'private') {
+      await messagesQuota.release(ctx.from?.id);
+      return;
+    }
 
     if (text.startsWith('/')) {
+      await messagesQuota.release(ctx.from?.id);
       await ctx.reply('🤔 Не знаю такую команду. Список всех команд — /help');
       return;
     }
 
     // Свободный текст запросом не считается — это осознанное решение,
     // чтобы случайные сообщения не тратили квоту нейросети.
+    // Слот messagesQuota тоже возвращаем — ответа модели не будет.
+    await messagesQuota.release(ctx.from?.id);
     await ctx.reply('Чтобы спросить нейросеть, используйте команду. Например:\n/гем ' + text.slice(0, 100));
   });
 }

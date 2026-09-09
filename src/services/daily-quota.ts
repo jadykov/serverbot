@@ -150,7 +150,20 @@ function createDailyQuota({ file, what, limit: limitOf, timezone }: QuotaOptions
     }
   };
 
-  return {
+  // Очередь мутаций счётчика: между чтением и записью стоят await,
+  // и два параллельных reserve без неё теряют инкремент — дневной лимит
+  // пробивается. Поллинг идёт параллельно, так что это не теория.
+  let tail: Promise<void> = Promise.resolve();
+  const serialize = <T>(job: () => Promise<T>): Promise<T> => {
+    const next = tail.then(job);
+    tail = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  };
+
+  const api: DailyQuota = {
     /**
      * Занимает один слот дневной нормы.
      *
@@ -231,12 +244,26 @@ function createDailyQuota({ file, what, limit: limitOf, timezone }: QuotaOptions
     async release(userId) {
       if (userId === undefined) return;
 
+      // load() обязателен: первая операция процесса после рестарта может
+      // быть именно release (быстрая отмена) — без него records пуст
+      // и возврат слота молча теряется.
+      await load();
+
       const record = records.get(userId);
       if (!record || record.day !== currentDay() || record.used <= 0) return;
 
       record.used -= 1;
       await save();
     },
+  };
+
+  return {
+    peek: api.peek,
+    // Мутации — строго по очереди через serialize выше. peek — чтение,
+    // ему очередь не нужна.
+    reserve: (userId) => serialize(() => api.reserve(userId)),
+    reset: (userId) => serialize(() => api.reset(userId)),
+    release: (userId) => serialize(() => api.release(userId)),
   };
 }
 

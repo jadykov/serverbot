@@ -29,9 +29,9 @@ import { InlineKeyboard, InputFile, type Bot } from 'grammy';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { escapeHtml } from '../format.js';
-import { withChatAction } from '../utils.js';
+import { withChatAction, sessionKey } from '../utils.js';
 import { resolveFastLevels, resolveImageProvider, type ChainLevel } from '../services/registry.js';
-import { imageQuota } from '../services/daily-quota.js';
+import { imageQuota, messagesQuota } from '../services/daily-quota.js';
 import { composeDrawing, planDrawing, stripStableDiffusionSyntax } from '../services/krea-prompt.js';
 import type { BotContext, DrawDraft } from '../types.js';
 
@@ -46,6 +46,14 @@ const CB = 'd';
  * $X»), а не только ориентир-константу: тарифы меняются, а факт — нет.
  */
 let lastImageCostUsd: number | undefined;
+
+/**
+ * Генерации в полёте по ключу «раздел:человек» (см. ниже у :go). Кнопки
+ * снимаются сразу, но два быстрых тапа по «Рисовать» всё равно прилетают
+ * оба — без этого сета оба ушли бы в платный generateImage с двойным
+ * списанием нормы.
+ */
+const drawingNow = new Set<string>();
 
 /**
  * Кто собирает промпт: быстрая цепочка (L1 Gemini lite-голова → L2 OpenRouter
@@ -204,6 +212,10 @@ async function showConfirm(ctx: BotContext, draft: DrawDraft): Promise<void> {
  * описан подробно, сразу показывает черновик на подтверждение.
  */
 export async function startDraw(ctx: BotContext, request: string): Promise<void> {
+  // Платная ветка со своей нормой: слот сообщений (50/день — только обычной
+  // ветке) возвращаем сразу, дальше считает imageQuota.
+  await messagesQuota.release(ctx.from?.id);
+
   if (!request) {
     await ctx.reply(
       'Опишите картинку после «!нарисуй». Например:\n' +
@@ -284,9 +296,11 @@ async function generate(ctx: BotContext, draft: DrawDraft): Promise<void> {
     return;
   }
 
-  const notice = await ctx.reply('🎨 Рисую… это занимает 10–60 секунд.');
+  const notice = await ctx.reply('🎨 Рисую… это занимает 10–60 секунд.').catch(() => undefined);
 
   try {
+    // Уведомление не ушло (сеть/флуд) — рисовать всё равно пробуем, удалять
+    // тогда нечего; слот при неудаче вернёт catch ниже.
     const provider = resolveImageProvider(ctx.session.imageProviderId);
     // Промпт, собранный в разговоре, менять уже незачем — raw. А «рисуй как
     // есть» держится как раз на дорисовке моделью, там оставляем medium.
@@ -306,10 +320,10 @@ async function generate(ctx: BotContext, draft: DrawDraft): Promise<void> {
     });
 
     clearDraft(ctx);
-    await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
+    if (notice) await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
   } catch (error) {
     await imageQuota.release(userId);
-    await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
+    if (notice) await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
     logger.warn('Не удалось нарисовать картинку', { error: error instanceof Error ? error.message : String(error) });
     await ctx.reply(`⚠️ ${error instanceof Error ? error.message : 'Не получилось нарисовать картинку.'}`);
   }
@@ -332,6 +346,12 @@ export function registerDrawCommands(bot: Bot<BotContext>): void {
 
     const [, stepRaw, optionRaw] = ctx.match as RegExpMatchArray;
     const step = Number(stepRaw);
+    // Шаг из кнопки обязан совпадать с текущим: старая кнопка (дабл-клик,
+    // возврат к прошлому вопросу) иначе перезапишет ответы и откатит диалог.
+    if (step !== draft.step) {
+      await ctx.answerCallbackQuery({ text: 'Кнопка устарела.', show_alert: true });
+      return;
+    }
     const question = draft.questions[step];
     const option = question?.options[Number(optionRaw)];
 
@@ -406,9 +426,23 @@ export function registerDrawCommands(bot: Bot<BotContext>): void {
       return;
     }
 
-    await ctx.answerCallbackQuery();
-    await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
-    await generate(ctx, draft);
+    // Ключ — раздел + человек, как у черновиков (per-user в сессии раздела):
+    // один человек может рисовать в двух топиках, а двое в одном топике —
+    // друг другу не мешают, диалоги и нормы у них независимы.
+    const inflightKey = `${sessionKey(ctx) ?? ctx.chat?.id ?? 0}:${ctx.from?.id ?? 0}`;
+    if (drawingNow.has(inflightKey)) {
+      await ctx.answerCallbackQuery({ text: 'Уже рисую — дождитесь результата.' });
+      return;
+    }
+    drawingNow.add(inflightKey);
+
+    try {
+      await ctx.answerCallbackQuery();
+      await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
+      await generate(ctx, draft);
+    } finally {
+      drawingNow.delete(inflightKey);
+    }
   });
 
   // Правка текстом: ждём следующее сообщение этого человека.
@@ -439,6 +473,10 @@ export function registerDrawCommands(bot: Bot<BotContext>): void {
 
     const edit = ctx.message.text.trim();
     if (edit.startsWith('/')) return next();
+
+    // Правка — часть платного сценария (бесплатный composeDrawing): слот
+    // сообщений возвращаем, дальше считает imageQuota.
+    await messagesQuota.release(ctx.from?.id);
 
     draft.awaitingEdit = false;
 

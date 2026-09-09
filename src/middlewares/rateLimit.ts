@@ -35,29 +35,47 @@ cleanupTimer.unref();
 export const rateLimit: MiddlewareFn<BotContext> = async (ctx, next) => {
   const userId = ctx.from?.id;
 
-  // Служебные апдейты без пользователя и админов не ограничиваем.
-  if (userId === undefined || isAdmin(userId)) {
+  // Служебные апдейты без пользователя не ограничиваем.
+  if (userId === undefined) {
     return next();
   }
 
   const now = Date.now();
-  const threshold = now - config.rateLimit.windowMs;
-  const timestamps = (hits.get(userId) ?? []).filter((time) => time > threshold);
+  // Скользящее окно — защита от спама. Админов не касается, кроме кнопок:
+  // дабл-тап — тоже спам, а кнопки для админа ничем не отличаются.
+  if (!isAdmin(userId) || ctx.callbackQuery !== undefined) {
+    const threshold = now - config.rateLimit.windowMs;
+    const timestamps = (hits.get(userId) ?? []).filter((time) => time > threshold);
 
-  if (timestamps.length >= config.rateLimit.max) {
-    const retryInSec = Math.max(1, Math.ceil(((timestamps[0] ?? now) + config.rateLimit.windowMs - now) / 1000));
-    logger.warn('Сработал рейт-лимит', { userId, limit: config.rateLimit.max });
-    await ctx.reply(`⏳ Слишком много запросов. Подождите ${retryInSec} с и попробуйте снова.`);
-    return; // next() не вызываем — обработка апдейта прекращается.
+    if (timestamps.length >= config.rateLimit.max) {
+      const retryInSec = Math.max(1, Math.ceil(((timestamps[0] ?? now) + config.rateLimit.windowMs - now) / 1000));
+      logger.warn('Сработал рейт-лимит', { userId, limit: config.rateLimit.max });
+      // Кнопке отвечаем в её же всплывашке, а не новым сообщением в чат.
+      if (ctx.callbackQuery !== undefined) {
+        await ctx.answerCallbackQuery({ text: `⏳ Слишком много запросов. Подождите ${retryInSec} с.` }).catch(() => undefined);
+      } else {
+        await ctx.reply(`⏳ Слишком много запросов. Подождите ${retryInSec} с и попробуйте снова.`);
+      }
+      return; // next() не вызываем — обработка апдейта прекращается.
+    }
+
+    timestamps.push(now);
+    hits.set(userId, timestamps);
   }
-
-  timestamps.push(now);
-  hits.set(userId, timestamps);
 
   // Дневная норма сообщений (MESSAGES_DAILY_LIMIT, по умолчанию 50):
   // обычный «/гем» идёт по бесплатному Gemini, но норма у него общая на всех.
   // Слот не возвращаем: middleware не знает, чем кончилась обработка, —
-  // считаются попытки, а не полученные ответы. Админы выше уже прошли мимо.
+  // считаются попытки, а не полученные ответы. Админы норме подчиняются
+  // наравне со всеми (см. daily-quota.ts): она делит общий кошелёк.
+  // Кнопки (callback_query) норму сообщений не тратят: это не сообщения,
+  // а нажатия. Платные действия за ними (картинки, треки) считают свои
+  // нормы сами, а «Отмена» тем более не должна стоить слота. Скользящее
+  // окно выше кнопки при этом касается — дабл-тап тоже спам.
+  if (ctx.callbackQuery !== undefined) {
+    return next();
+  }
+
   const slot = await messagesQuota.reserve(userId);
   if (!slot.allowed) {
     logger.warn('Дневная норма сообщений исчерпана', { userId, limit: slot.limit });

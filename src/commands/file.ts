@@ -25,6 +25,7 @@ import { escapeHtml, markdownToHtmlPage, markdownToPlainText } from '../format.j
 import { withChatAction, sessionKey } from '../utils.js';
 import { generateWithFallback, resolveSmartLevels } from '../services/registry.js';
 import { rememberMessage } from '../services/search-index.js';
+import { messagesQuota } from '../services/daily-quota.js';
 import { resolveChain, THINK_CHAIN } from '../models.js';
 import type { BotContext } from '../types.js';
 
@@ -209,6 +210,7 @@ export async function handleFile(ctx: BotContext, request: string): Promise<void
   const { format, rest } = takeFormat(request);
 
   if (!rest) {
+    await messagesQuota.release(ctx.from?.id);
     await ctx.reply(
       'Напишите, что положить в файл:\n' +
         '<code>/гем !файл смета на ремонт кухни</code>\n' +
@@ -222,6 +224,7 @@ export async function handleFile(ctx: BotContext, request: string): Promise<void
   // (THINK_CHAIN ниже — алиас smart, см. models.ts: моделей и потолок те же.)
   const levels = resolveSmartLevels(resolveChain(THINK_CHAIN).models, config.files.maxOutputTokens);
   if (levels.length === 0) {
+    await messagesQuota.release(ctx.from?.id);
     await ctx.reply('🔌 Нейросеть не подключена — собирать файл некому.');
     return;
   }

@@ -9,6 +9,7 @@ import { GrammyError, type Bot } from 'grammy';
 import { config, isAdmin } from '../config.js';
 import { logger } from '../logger.js';
 import { describeProviders, findTextProvider, generateWithFallback, resolveSmartLevels, resolveTextProvider } from '../services/registry.js';
+import { messagesQuota } from '../services/daily-quota.js';
 import { escapeHtml } from '../format.js';
 import { formatDuration } from '../utils.js';
 import type { BotContext } from '../types.js';
@@ -119,7 +120,7 @@ const HELP_TEXT = [
   `${config.goapi.music.maxDuration} с. Без пения — скажите «инструментал».`,
   '',
   '<b>Поиск по переписке.</b> <code>гем !найди</code> <i>что искать</i> — по нашей переписке',
-  'в разделе, по смыслу, а не по буквам. Бесплатно и без нормы.',
+  'в разделе, по смыслу, а не по буквам. Своей нормы нет — тратит норму сообщений.',
   '',
   '<b>Себе в личные.</b> <code>гем !личка</code> реплаем — пришлю то сообщение вам в личку:',
   'файл, снимок или текст. Нужно, чтобы вы хоть раз мне писали — первым я не могу.',
@@ -322,6 +323,9 @@ const CYRILLIC_START = /^\/(?:старт|включись)(?:@[A-Za-z0-9_]+)?\s*
  * замолчавший бот иначе выглядит сломавшимся, и разбираться пойдут все сразу.
  */
 async function muteHere(ctx: BotContext): Promise<void> {
+  // Модели тут нет — слот нормы сообщений (занят в middleware) возвращаем сразу.
+  await messagesQuota.release(ctx.from?.id);
+
   const who = escapeHtml(ctx.from?.first_name ?? 'кто-то');
 
   if (ctx.session.muted) {
@@ -350,6 +354,8 @@ async function muteHere(ctx: BotContext): Promise<void> {
  * а она на два экрана.
  */
 async function unmuteHere(ctx: BotContext): Promise<void> {
+  await messagesQuota.release(ctx.from?.id);
+
   const name = escapeHtml(ctx.from?.first_name ?? 'друг');
 
   if (ctx.session.muted) {
@@ -374,6 +380,7 @@ export function registerBasicCommands(bot: Bot<BotContext>): void {
 
   // ----------------------------------------------------------------- /help
   bot.command('help', async (ctx) => {
+    await messagesQuota.release(ctx.from?.id);
     await sendHelp(ctx);
   });
 
@@ -381,6 +388,7 @@ export function registerBasicCommands(bot: Bot<BotContext>): void {
   // Отправляем сообщение и сразу его редактируем: разница во времени
   // и есть реальная задержка до Bot API (round-trip).
   bot.command('ping', async (ctx) => {
+    await messagesQuota.release(ctx.from?.id);
     const startedAt = Date.now();
     const message = await ctx.reply('🏓 Pong!');
     const latency = Date.now() - startedAt;
@@ -397,23 +405,28 @@ export function registerBasicCommands(bot: Bot<BotContext>): void {
   // Простейший тест «команда → ответ»: если работает, значит апдейты
   // доходят до бота, а ответы — до Telegram.
   bot.command('marco', async (ctx) => {
+    await messagesQuota.release(ctx.from?.id);
     await ctx.reply('🌊 Polo!');
   });
 
   bot.command('polo', async (ctx) => {
+    await messagesQuota.release(ctx.from?.id);
     await ctx.reply('🏊 Marco!');
   });
 
   // Тот же тест, но на обычное сообщение без слэша: напишите «marco» — получите «Polo!».
   bot.hears(/^\s*marco[\s!.?]*$/i, async (ctx) => {
+    await messagesQuota.release(ctx.from?.id);
     await ctx.reply('🌊 Polo!');
   });
   bot.hears(/^\s*(поло|polo)[\s!.?]*$/i, async (ctx) => {
+    await messagesQuota.release(ctx.from?.id);
     await ctx.reply('🏊 Marco!');
   });
 
   // --------------------------------------------------------------- /whoami
   bot.command('whoami', async (ctx) => {
+    await messagesQuota.release(ctx.from?.id);
     const user = ctx.from;
     const lines = [
       '<b>Кто вы для бота</b>',
@@ -433,6 +446,7 @@ export function registerBasicCommands(bot: Bot<BotContext>): void {
 
   // --------------------------------------------------------------- /status
   bot.command('status', async (ctx) => {
+    await messagesQuota.release(ctx.from?.id);
     const memory = process.memoryUsage();
     const lines = [
       '<b>Состояние сервиса</b>',
@@ -471,6 +485,9 @@ export function registerBasicCommands(bot: Bot<BotContext>): void {
   // ещё и настоящий (короткий и дешёвый) запрос к текстовой нейросети.
   bot.command('test', async (ctx) => {
     const withAiCheck = ctx.match.trim().toLowerCase() === 'ai';
+    // Без флага модель не дёргаем — слот возвращаем; с флагом идёт живой
+    // запрос, слот честно тратится.
+    if (!withAiCheck) await messagesQuota.release(ctx.from?.id);
     const results: string[] = ['<b>Самодиагностика</b>', ''];
 
     // 1. Связь с Telegram Bot API.
