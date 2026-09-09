@@ -10,8 +10,10 @@
  *   /гем !файл <что сделать>          — модель создаёт содержимое в формате по умолчанию (md);
  *   /гем !файл <формат> <что сделать> — тот же заказ в названном формате.
  *
- * Реплай ничего не выгружает: «!файл» всегда идёт к модели, выгрузка сообщений
- * реплаем убрана как неактуальная.
+ * Реплай подхватывается: текст/подпись цитируются (до 700 знаков, как
+ * в обычной ветке через buildReplyQuotePrompt), а документ из реплая
+ * скачивается и читается через prepareDocument — иначе модель получала
+ * только слова заказа («составь таблицу…») и выдумывала содержимое.
  *
  * Расширение выбирается, а не назначается: явное слово в запросе сильнее
  * всего, потом — по содержимому (страница, картинка, блок кода), и только
@@ -23,6 +25,8 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { escapeHtml, markdownToHtmlPage, markdownToPlainText } from '../format.js';
 import { withChatAction, sessionKey } from '../utils.js';
+import { downloadAttachment } from '../media.js';
+import { prepareDocument } from '../services/documents.js';
 import { generateWithFallback, resolveSmartLevels } from '../services/registry.js';
 import { rememberMessage } from '../services/search-index.js';
 import { messagesQuota } from '../services/daily-quota.js';
@@ -205,9 +209,25 @@ export async function sendAnswerAsFile(
 
 /**
  * «/гем !файл ...»: формат первым словом, дальше заказ модели.
+ *
+ * Реплай — часть заказа: текст/подпись цитируются, документ из реплая
+ * читается (текст — в промпт, PDF — вложением). Без этого модель видела
+ * только «составь таблицу…» и сочиняла файл из ничего.
  */
 export async function handleFile(ctx: BotContext, request: string): Promise<void> {
-  const { format, rest } = takeFormat(request);
+  const { format, rest: rawRest } = takeFormat(request);
+
+  // Текст/подпись сообщения, на которое ответили. Цитата — до 700 знаков,
+  // как в обычной ветке (buildReplyQuotePrompt в ./ai.ts): отвечать могут
+  // на давнее сообщение, которого в истории уже нет.
+  const replied = ctx.message?.reply_to_message as
+    | { document?: { file_id: string; file_name?: string }; text?: string; caption?: string; from?: { id: number } }
+    | undefined;
+  const repliedText = (replied?.text ?? replied?.caption ?? '').trim();
+  const repliedDocument = replied?.document;
+
+  let rest = rawRest;
+  if (!rest && repliedText) rest = repliedText;
 
   if (!rest) {
     await messagesQuota.release(ctx.from?.id);
@@ -219,6 +239,14 @@ export async function handleFile(ctx: BotContext, request: string): Promise<void
     );
     return;
   }
+
+  // Заказ с цитатой реплая (если есть что цитировать и это не сам заказ).
+  const order =
+    repliedText && repliedText !== rest
+      ? replied?.from?.id === ctx.me?.id
+        ? `Пользователь отвечает на твою реплику:\n«${repliedText.slice(0, 700)}»\n\nЗаказ на файл: ${rest}`
+        : `Заказ задан реплаем на сообщение в чате:\n«${repliedText.slice(0, 700)}»\n\nЗаказ на файл: ${rest}`
+      : rest;
 
   // Умные уровни: OpenRouter-голова, потом Gemini smart-хвост.
   // (THINK_CHAIN ниже — алиас smart, см. models.ts: моделей и потолок те же.)
@@ -232,10 +260,38 @@ export async function handleFile(ctx: BotContext, request: string): Promise<void
   const chosen = format ?? FORMATS[config.files.defaultFormat] ?? FORMATS.md!;
 
   try {
+    // Документ из реплая: скачиваем и читаем, как handleDocument в ./ai.ts.
+    // Текст кладём в промпт, PDF — вложением (модель читает его сама).
+    // Ошибка чтения (не тот формат, слишком большой) — сразу человеку.
+    let prompt = order;
+    let attachments: { data: Buffer; mimeType: string }[] | undefined;
+    if (repliedDocument) {
+      const fileName = repliedDocument.file_name ?? 'файл';
+      const notice = await ctx.reply(`📄 Читаю «${fileName}»…`);
+      try {
+        const file = await withChatAction(ctx, 'typing', () => downloadAttachment(ctx, repliedDocument.file_id));
+        const prepared = await prepareDocument(file.data, fileName);
+        prompt = prepared.text ? `Файл «${fileName}»:\n\n${prepared.text}\n\n---\n\n${order}` : order;
+        if (prepared.attachment) attachments = [prepared.attachment];
+        await ctx.api
+          .editMessageText(
+            notice.chat.id,
+            notice.message_id,
+            `📄 «${fileName}» — ${prepared.tokens.toLocaleString('ru')} токенов${prepared.note ? `, ${prepared.note}` : ''}. Собираю файл…`,
+          )
+          .catch(() => undefined);
+        await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
+      } catch (error) {
+        await ctx.api.deleteMessage(notice.chat.id, notice.message_id).catch(() => undefined);
+        throw error;
+      }
+    }
+
     const answer = await withChatAction(ctx, 'upload_document', () =>
-      generateWithFallback(levels, rest, {
+      generateWithFallback(levels, prompt, {
         systemPrompt: buildInstruction(chosen.hint),
         temperature: 0.6,
+        ...(attachments ? { attachments } : {}),
       }),
     );
 
