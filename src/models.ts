@@ -33,9 +33,11 @@
  *
  * Первые уровни обеих двухуровневых цепочек живут на OpenRouter (см.
  * config.openai.chains и resolveSmartLevels/resolveFastLevels в registry.ts):
- * smart — contrib → luna, fast — середина contrib → luna (точный плоский
-  * порядок владельца: lite-голова → contrib → luna → Gemma-хвост). За ними —
- * Gemini-хвосты из config.gemini.chains.
+ * smart — только contrib, fast — середина contrib (точный плоский
+ * порядок владельца: lite-голова → contrib → Gemma-хвост; luna в середине —
+ * только для диалога «!нарисуй», см. resolveFastLevels(true)). За ними —
+ * Gemini-хвосты из config.gemini.chains. Отдельно luna запасом после
+ * contrib стоит в «!сети» (resolveWebLevels) и «!размышлении» (DEEP_CHAIN).
  *
  * Сами имена моделей лежат в конфигурации и правятся через .env —
  * см. комментарий у config.gemini.chains.
@@ -55,12 +57,13 @@ export const VOICE_CHAIN = 'voice';
  * Умная и быстрая цепочки (п.3 плана: OpenRouter pay-as-you-go + Gemini-хвост).
  *
  * smart — всё содержательное: разговор, картинки, документы,
- * «!сеть», «!файл». Первый уровень `OPENAI_CHAIN_SMART` (contrib→luna),
+ * «!сеть», «!файл». Первый уровень `OPENAI_CHAIN_SMART` (только contrib),
  * второй — Gemini main-хвост. Замер contrib-про-пустоту и пол 4000
  * в registry.ts сохранены: потолок smart не опускать ниже 4000.
  * fast — формальные JSON-планы (рисование, !скажи, !трек): три уровня
- * (L1 Gemini lite-голова → L2 OpenRouter contrib→luna → L3 Gemma-хвост,
- * см. resolveFastLevels), второй — отдельный Gemini fast-хвост
+ * (L1 Gemini lite-голова → L2 OpenRouter contrib → L3 Gemma-хвост,
+ * см. resolveFastLevels; диалог «!нарисуй» добавляет luna запасом
+ * после contrib флагом withLuna), второй — отдельный Gemini fast-хвост
  * (GEMINI_CHAIN_FAST, не LIGHT).
  *
  * voice остаётся чисто на Gemini: звук через OpenRouter не проверен
@@ -100,7 +103,7 @@ export function listChains(): ChainInfo[] {
     {
       id: FAST_CHAIN,
       title: 'Быстрый',
-      hint: 'Служебные планы (рисование, озвучка, треки). Уровни: lite-голова, OpenRouter (contrib→luna), Gemma-хвост.',
+      hint: 'Служебные планы (рисование, озвучка, треки). Уровни: lite-голова, OpenRouter (contrib; luna — только в !нарисуй), Gemma-хвост.',
       models: config.gemini.chains.fast,
       maxOutputTokens: config.gemini.maxOutput.main,
     },

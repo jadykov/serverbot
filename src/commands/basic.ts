@@ -47,7 +47,7 @@ import type { BotContext } from '../types.js';
 
 /** Строки списка «Главное»: буквальная команда, слово-плейсхолдер и описание. */
 const MAIN_COMMANDS: ReadonlyArray<{ command: string; arg?: string; description: string }> = [
-  { command: 'гем', arg: 'вопрос', description: 'спросить' },
+  { command: 'гем', arg: 'вопрос', description: `спросить (${config.messagesQuota.perUserPerDay} в день)` },
   { command: 'гем !сеть', arg: 'вопрос', description: `поиск в интернете (${config.webQuota.perUserPerDay} в день)` },
   {
     command: 'гем !размышление',
@@ -81,7 +81,7 @@ const HELP_TEXT = [
   '<b>Главное</b>',
   ...formatCommandList(MAIN_COMMANDS),
   '',
-  '<b>❗ Восклицательный знак обязателен</b>',
+  '❗ <b>Восклицательный знак обязателен</b>',
   '<code>гем</code> <i>скажи, что такое рекурсия</i> — <i>это вопрос</i>',
   '<code>гем !скажи</code> <i>что такое рекурсия</i> — <i>это озвучка</i>',
   '',
@@ -131,15 +131,15 @@ const HELP_TEXT = [
   '',
   '<blockquote expandable><b>Проверка и служебное</b>',
   '',
-  '/ping — задержка до Telegram',
-  '/marco и /polo — отвечу «Polo!» и «Marco!»',
-  '/test — связь и готовность нейросетей',
-  '/test ai — то же плюс живой запрос',
-  '/stop — замолчать в этом разделе, /start — включить обратно',
-  '/whoami — ваши id пользователя и чата',
-  '/status — аптайм, память, режим работы',
+  '<code>/ping</code> — задержка до Telegram',
+  '<code>/marco</code> и <code>/polo</code> — отвечу «Polo!» и «Marco!»',
+  '<code>/test</code> — связь и готовность нейросетей',
+  '<code>/test ai</code> — то же плюс живой запрос',
+  '<code>/stop</code> — замолчать в этом разделе, <code>/start</code> — включить обратно',
+  '<code>/whoami</code> — ваши id пользователя и чата',
+  '<code>/status</code> — аптайм, память, режим работы',
   '<code>гем !лимиты</code> — сколько осталось от дневных норм',
-  '/help — эта справка</blockquote>',
+  '<code>/help</code> — эта справка</blockquote>',
 ].join('\n');
 
 /**

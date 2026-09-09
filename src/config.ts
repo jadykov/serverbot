@@ -444,7 +444,7 @@ export const config = {
      *
      * Обоснование: запрос сюда — это Tavily (до 90 секунд, см. config.ai.timeoutMs
      * в services/tavily.ts) плюс два быстрых прохода по web-уровням (голова —
-     * luna за ~1 секунду, хвост — lite): 90 + запас на оба прохода и на очередь.
+     * contrib, запас luna, хвост — lite): 90 + запас на оба прохода и на очередь.
      * Прежних 150 секунд было много — они остались от времён, когда первым
      * проходом отвечала медленная Gemma-хвостовая голова.
      */
@@ -859,35 +859,39 @@ export const config = {
     /**
      * Цепочки поверх OpenAI-совместимого API (п.3 плана: OpenRouter pay-as-you-go).
      *
-     * Тот же провайдер, что выше: OpenRouter притворяется OpenAI
-     * (`POST {baseUrl}/chat/completions`), дефолт baseUrl — уже OpenRouter,
-     * для нативного OpenAI переопредели OPENAI_BASE_URL
-     * (см. services/openai-compatible.ts).
-     *
-      * smart — умная голова (`contrib → luna`), fast — быстрая
-      * (`contrib → luna` для формальных JSON-планов: точный плоский порядок
-      * владельца 3.5-lite → 3.1-lite → contrib → luna → gemma, где luna и
-     * contrib — середина). За каждой — уровни на Gemini
-     * (см. generateWithFallback в services/registry.ts).
-     *
-     * Замерено 2026-09-08: contrib с маленьким max_tokens отдаёт ПУСТОТУ
-     * (finish length — весь лимит съедают рассуждения: при 50 токенах ответ
-     * null, при 2000 — «тест» за 5с). Поэтому потолок smart — 8000, а в
-     * вызывающих местах — пол 4000 (см. askChain). TTFT contrib ~1с,
-     * полный ответ 4–13с — голова для чата годна.
-     */
+      * Тот же провайдер, что выше: OpenRouter притворяется OpenAI
+      * (`POST {baseUrl}/chat/completions`), дефолт baseUrl — уже OpenRouter,
+      * для нативного OpenAI переопредели OPENAI_BASE_URL
+      * (см. services/openai-compatible.ts).
+      *
+      * smart — умная голова (только contrib): обычный разговор, картинки,
+      * документы, «!файл». fast — быстрая (только contrib) для формальных
+      * JSON-планов: планировщик !скажи, !трек (точный плоский порядок
+      * владельца 3.5-lite → 3.1-lite → contrib → gemma, где contrib —
+      * середина). За каждой — уровни на Gemini
+      * (см. generateWithFallback в services/registry.ts).
+      *
+      * Luna (openai/gpt-5.6-luna) запасом после contrib стоит только там,
+      * где решает владелец: «!сеть» (resolveWebLevels), «!размышление»
+      * (DEEP_CHAIN) и диалог «!нарисуй» (resolveFastLevels с флагом).
+      * В остальные цепочки её не добавлять: каждый лишний вызов luna —
+      * деньги без нужды.
+      *
+      * Замерено 2026-09-08: contrib с маленьким max_tokens отдаёт ПУСТОТУ
+      * (finish length — весь лимит съедают рассуждения: при 50 токенах ответ
+      * null, при 2000 — «тест» за 5с). Поэтому потолок smart — 8000, а в
+      * вызывающих местах — пол 4000 (см. askChain). TTFT contrib ~1с,
+      * полный ответ 4–13с — голова для чата годна.
+      */
     chains: {
-      smart: envStringList('OPENAI_CHAIN_SMART', [
-        'meta/muse-spark-1.3-contributor',
-        'openai/gpt-5.6-luna',
-      ]),
-      fast: envStringList('OPENAI_CHAIN_FAST', ['meta/muse-spark-1.3-contributor', 'openai/gpt-5.6-luna']),
+      smart: envStringList('OPENAI_CHAIN_SMART', ['meta/muse-spark-1.3-contributor']),
+      fast: envStringList('OPENAI_CHAIN_FAST', ['meta/muse-spark-1.3-contributor']),
     },
     /**
      * Таймаут умной цепочки: contrib думает долго (полный ответ до ~13с
      * на длинном русском, vision — до 25с), 90с общего AI_TIMEOUT_MS ей
      * впритык. Быстрый уровень идёт с общим AI_TIMEOUT_MS (90с): contrib
-     * отвечает за секунды, а luna в запасе L2 много не добавит.
+     * отвечает за секунды, планам хватает.
      */
     timeoutMs: envInt('OPENAI_TIMEOUT_MS', 120_000),
     maxOutput: {

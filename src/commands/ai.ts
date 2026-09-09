@@ -70,9 +70,9 @@ import {
   type WebPage,
 } from '../services/tavily.js';
 import { DEEP_SETUP_HINT, deepThoughtBudget, isDeepThinkConfigured, thinkDeeply } from '../services/openrouter-think.js';
-import { deepQuota, imageQuota, resetEveryQuota, trackQuota, ttsQuota, webQuota, type DailyQuota } from '../services/daily-quota.js';
+import { deepQuota, imageQuota, messagesQuota, resetEveryQuota, trackQuota, ttsQuota, webQuota, type DailyQuota } from '../services/daily-quota.js';
 import { handleFile, sendAnswerAsFile, type AnswerFormat } from './file.js';
-import { FAST_CHAIN, resolveChain, SMART_CHAIN, THINK_CHAIN, VOICE_CHAIN, type ChainInfo } from '../models.js';
+import { resolveChain, SMART_CHAIN, THINK_CHAIN, VOICE_CHAIN, type ChainInfo } from '../models.js';
 import {
   ProviderNotConfiguredError,
   ProviderRequestError,
@@ -277,8 +277,8 @@ const SEARCH_PREFIX = switchWord('найди|найти');
  * Поиск включается словом, а не идёт по каждому вопросу, и вот почему.
  * Сам поиск через Tavily идёт за бесплатные кредиты пакета (в бесплатном
  * их 1000, по одному за обычный поиск — см. src/services/tavily.ts),
- * а платная — модель, которая пишет ответ по найденным страницам
- * (web-уровни: голова-luna, хвост Gemini). Отсюда и дневная норма (см. handleWeb
+  * а платная — модель, которая пишет ответ по найденным страницам
+  * (web-уровни: голова contrib, запас luna, хвост Gemini). Отсюда и дневная норма (см. handleWeb
  * ниже), и то, что «привет» не уходит искать в интернет.
  *
  * «Гугл» принят вторым написанием: слово в такой просьбе приходит в голову
@@ -763,16 +763,15 @@ async function askChain(
     const history = takeHistory(ctx.session.history, config.ai.historySend);
 
     // Двухуровневый фолбэк (п.3 плана): для умных цепочек сначала спрашиваем
-    // OpenRouter (contrib→luna), при отказе всей его цепочки — Gemini-хвост.
+    // OpenRouter (только contrib — luna запасом лишь в !сеть, !размышлении
+    // и !нарисуй), при отказе всей его цепочки — Gemini-хвост.
     // Голосовая идёт только через Gemini: звук на OpenRouter не проверен.
     // Уровни собираются здесь, а не в models.ts: ChainInfo хранит один список,
     // а уровней два (провайдер+цепочка у каждого свои).
     const levels =
-      chain.id === FAST_CHAIN
-        ? resolveFastLevels()
-        : chain.id === VOICE_CHAIN
-          ? [{ provider, models: chain.models, maxOutputTokens: chain.maxOutputTokens }]
-          : resolveSmartLevels(chain.models, chain.maxOutputTokens);
+      chain.id === VOICE_CHAIN
+        ? [{ provider, models: chain.models, maxOutputTokens: chain.maxOutputTokens }]
+        : resolveSmartLevels(chain.models, chain.maxOutputTokens);
     // Пока модель думает, показываем «печатает…».
     // Честный список кандидатов — только здесь: уровни (а значит и модели)
     // собраны парой строк выше, в правилах выше их ещё не было.
@@ -1574,7 +1573,7 @@ async function handleWeb(ctx: BotContext, query: string): Promise<void> {
 }
 
 /**
- * Страницы от Tavily, ответ пишут web-уровни: L1 luna, L2 Gemini-хвост.
+ * Страницы от Tavily, ответ пишут web-уровни: L1 contrib→luna, L2 Gemini-хвост.
  *
  * Возвращает null, если ответить не вышло — ничего не нашлось или ни один
  * текстовый провайдер не настроен; в обоих случаях сообщение об этом уже
@@ -1763,8 +1762,8 @@ async function handleResetUser(ctx: BotContext, target: string): Promise<void> {
 /**
  * «/гем !лимиты» — сколько осталось сегодня от показанных дневных норм.
  *
- * Порядок — от самой щедрой нормы к самой строгой: поиск в интернете,
- * озвучка, размышление, картинки, треки (см. src/config.ts).
+ * Порядок — от самой щедрой нормы к самой строгой: сообщения, поиск
+ * в интернете, озвучка, размышление, картинки, треки (см. src/config.ts).
  * peek() ничего не тратит, только подсматривает — этим и отличается
  * от reserve() в остальных обработчиках.
  */
@@ -1776,6 +1775,7 @@ async function handleLimits(ctx: BotContext): Promise<void> {
   }
 
   const items: Array<{ icon: string; label: string; quota: DailyQuota }> = [
+    { icon: '💬', label: 'Сообщения', quota: messagesQuota },
     { icon: '🌐', label: 'Поиск в интернете', quota: webQuota },
     { icon: '🔊', label: 'Озвучка', quota: ttsQuota },
     { icon: '🧠', label: 'Размышление', quota: deepQuota },

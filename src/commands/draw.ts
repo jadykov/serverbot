@@ -49,7 +49,9 @@ let lastImageCostUsd: number | undefined;
 
 /**
  * Кто собирает промпт: быстрая цепочка (L1 Gemini lite-голова → L2 OpenRouter
- * contrib→luna → L3 Gemma-хвост) — та же, что у !скажи и !трек (см. commands/ai.ts). Раньше
+ * contrib→luna → L3 Gemma-хвост) — с запасом luna, который положен только
+ * «!нарисуй» (см. resolveFastLevels: планировщики !скажи и !трек идут без
+ * неё). Раньше
  * разговор вёл то THINK_CHAIN, то «light» (картинка стоит денег и нормирована —
  * промах на этапе бесплатного разговора обиднее лишних секунд), теперь всё
  * это — одна быстрая цепочка со своей головой, отдельной от разговорной,
@@ -59,7 +61,7 @@ let lastImageCostUsd: number | undefined;
  * тогда рисуем сразу, без вопросов.
  */
 function planner(): ChainLevel[] | null {
-  const levels = resolveFastLevels();
+  const levels = resolveFastLevels(true);
   return levels.length > 0 ? levels : null;
 }
 
